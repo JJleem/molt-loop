@@ -23,8 +23,8 @@ You are operating inside a new project created from the Loop Runtime Starter Kit
 Before doing anything else, inspect and understand the following files if they exist:
 
 - `CLAUDE.local.md`
-- `docs/PROJECT-PHASE-PLANNER.md`
-- `docs/PROJECT-BOOTSTRAP.md`
+- `prompts/PROJECT-PHASE-PLANNER.md`
+- `prompts/PROJECT-BOOTSTRAP.md`
 - `docs/LOOP-RUNTIME-FIELD-NOTES.md`
 - `.loop/KERNEL.md`
 - `.loop/project.yaml`
