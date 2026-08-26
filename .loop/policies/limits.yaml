@@ -1,0 +1,28 @@
+# V0 정지·에스컬레이션 정책 (Runtime이 강제한다. Worker는 읽지도 수정하지도 않는다.)
+
+stop:
+  max_attempts: 3
+  max_consecutive_failures: 2
+
+stall:
+  # V0에서는 감지만 정의하고 자동 대응은 하지 않는다. 초과 시 needs-human.
+  identical_tool_calls: 3
+  unchanged_error_string: 2
+  zero_diff_attempts: 2
+
+escalation:
+  retry_max: 1          # transient 실패만
+  hint_retry_max: 1     # failure_memo의 lesson을 Context에 주입한 재시도
+  then: needs-human     # V0에서는 replan/decompose 자동화 없음 - 사람에게 올린다
+
+planning:
+  # 하나의 Plan이 제안할 수 있는 최대 Task 수. 초과하면 Plan 검증이 실패한다 —
+  # 조용히 잘라내지 않고, 줄여 달라고 다른 AI를 부르지도 않는다.
+  max_tasks_per_plan: 12
+
+verifier:
+  max_parallel: 1
+  input_excludes:
+    - worker_summary
+    - worker_self_evaluation
+    - progress_narrative

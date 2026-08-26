@@ -1,0 +1,15 @@
+# Loop Runtime 실행 산출물 (runs / leases / staging). 디렉터리 자체는 .gitkeep으로 유지한다.
+/.loop-local/*
+!/.loop-local/.gitkeep
+!/.loop-local/runs/
+!/.loop-local/leases/
+!/.loop-local/staging/
+!/.loop-local/plans/
+/.loop-local/runs/*
+!/.loop-local/runs/.gitkeep
+/.loop-local/leases/*
+!/.loop-local/leases/.gitkeep
+/.loop-local/staging/*
+!/.loop-local/staging/.gitkeep
+/.loop-local/plans/*
+!/.loop-local/plans/.gitkeep

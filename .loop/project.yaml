@@ -1,0 +1,77 @@
+# V0 Loop Runtime 프로젝트 설정
+# 여기 적힌 command는 현재 repository에 실제로 존재하는 것만 적는다.
+# 존재하지 않는 명령을 추정해서 채우지 않는다.
+
+project:
+  name: 3d-asset-compatibility-lab
+  # 계획된 스택 (아직 미생성): React + TypeScript + Vite
+  # 현재 repository 상태: 애플리케이션 소스 없음, package.json 없음
+  language: typescript
+  package_manager: npm      # 로컬 확인: node v24.19.0 / npm 11.17.0
+  vcs: git
+
+runtime:
+  max_parallel_workers: 1
+
+  # Worker 실행 설정
+  worker_adapter: claude          # loopctl adapters 로 사용 가능 여부 확인
+  worker_timeout_seconds: 900
+  worker_model: null              # null이면 CLI 기본 모델. 모델 이름은 추측하지 않고 Envelope에 실제 값을 기록한다.
+
+  # Gate 실행 설정 (Runtime이 직접 subprocess로 실행한다. LLM 호출 없음)
+  gate_timeout_seconds: 300       # 개별 Gate 기본 timeout. gates.<name>.timeout_seconds 로 덮어쓸 수 있다.
+
+  # 독립 Verifier 설정. Worker와 항상 별개의 invocation이며 세션을 공유하지 않는다.
+  verifier_adapter: claude
+  verifier_timeout_seconds: 600
+  verifier_model: null            # null이면 CLI 기본 모델. 실제 모델은 Verifier Envelope에 기록된다.
+
+  # Goal Planner 설정. Worker/Verifier와 항상 별개의 invocation이며 세션을 공유하지 않는다.
+  # Planner는 읽기 전용이다 — Task 파일을 쓰지 않는다. Task 생성은 plan-approve만 한다.
+  planner_adapter: claude
+  planner_timeout_seconds: 600
+  planner_model: null             # null이면 CLI 기본 모델. 실제 모델은 Planner Envelope에 기록된다.
+
+  kernel: .loop/KERNEL.md
+  skills_dir: .loop/skills
+  tasks_dir: .loop/tasks
+  evidence_dir: .loop/evidence
+  policies_dir: .loop/policies
+  local_dir: .loop-local
+
+# Gate 명령은 Runtime만 소유한다. Worker Result·Task 서술·AC description에서 오는 문자열은
+# 절대 실행하지 않는다. Task가 참조하는 Gate 이름은 반드시 여기에 존재해야 한다.
+# 항목 필드: enabled · command · reason · timeout_seconds(선택) · cwd(선택, 루트 기준 상대경로)
+gates:
+  # 아직 package.json이 없으므로 세 Gate 모두 비활성 상태다.
+  # 앱 scaffold(npm create vite) 이후 command를 채우고 enabled: true로 바꾼다.
+  # 비활성 Gate를 Task가 요구하면 Gate 결과는 ERROR다 — PASS를 지어내지 않는다.
+  build:
+    enabled: false
+    command: null
+    reason: "package.json 없음 - build script 미정의"
+  lint:
+    enabled: false
+    command: null
+    reason: "package.json 없음 - lint script 미정의"
+  test:
+    enabled: false
+    command: null
+    reason: "package.json 없음 - test script 미정의"
+
+# 정지·에스컬레이션 정책(max_attempts · max_consecutive_failures · retry_max)과
+# 계획 한도(planning.max_tasks_per_plan)는 .loop/policies/limits.yaml 한 곳에만 둔다.
+# 여기에 중복해서 적지 않는다.
+
+task_states:
+  - TODO
+  - IN_PROGRESS
+  - REVIEW
+  - DONE
+  - BLOCKED
+  - DROPPED
+
+# Worker가 요청할 수 있는 전이. 실제 전이는 Runtime만 수행한다.
+worker_requestable_transitions:
+  - REVIEW
+  - BLOCKED

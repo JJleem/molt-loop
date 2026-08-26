@@ -1,0 +1,52 @@
+# ============================================================
+# 예제 Task — Task Schema 검증 전용. 자동 실행되지 않는다.
+#   auto_dispatch: false  이고 status 가 DROPPED 이므로 READY Queue 에 진입하지 않는다.
+#   실제 Task를 만들 때는 이 파일을 복사해서 새 id로 만든다. 이 파일은 실행하지 않는다.
+# ============================================================
+id: TASK-EXAMPLE
+status: DROPPED
+auto_dispatch: false
+example: true
+
+request: "Task Schema 형식을 보여주는 예제. 실제로 수행할 작업이 아니다."
+
+execution:
+  role: impl
+
+stop_condition:
+  gates: []                      # 활성 Gate가 생기면 [build, lint, test]
+  requires_verifier: true
+  max_consecutive_failures: 2
+
+# 모든 AC는 구체적인 판정 방법(verification)을 가져야 한다.
+# V0가 지원하는 type은 gate와 verifier 둘뿐이다.
+acceptance_criteria:
+  # type: gate — 결정론적으로 판정된다. ref는 판정에 쓰는 Gate 이름이다.
+  - id: AC1
+    description: Example deterministic criterion
+    verification:
+      type: gate
+      ref: example_gate
+
+  # type: verifier — 독립적인 판단이 필요하다. instruction은 선택이며,
+  # description만으로 판정이 가능하면 생략할 수 있다.
+  - id: AC2
+    description: Example reasoning-based criterion
+    verification:
+      type: verifier
+      instruction: >
+        Inspect the canonical diff and evidence and determine whether
+        this criterion is satisfied.
+
+evidence: []
+  # Runtime과 Worker가 채운다. 예:
+  #   - kind: test
+  #     path: .loop/evidence/TASK-EXAMPLE/test.json
+  #     sha256: ""
+
+failure_memo: []
+  # Runtime이 채운다. 실패 궤적 전체가 아니라 증류된 lesson만. 예:
+  #   - attempt: 2
+  #     stage: verifier
+  #     error: VERIFY_FAILED
+  #     lesson: "AC-3 미구현. 테스트는 통과하지만 해당 케이스가 없음."

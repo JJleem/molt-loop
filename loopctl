@@ -1,0 +1,7 @@
+#!/bin/sh
+# loopctl — Loop Runtime entry point (project root).
+# Runtime 로직은 여기에 두지 않는다. 인자를 그대로 넘기고 exit code를 그대로 돌려준다.
+# exec를 쓰므로 Ctrl+C 시그널이 node로 직접 가고 종료 코드도 그대로 전파된다.
+set -e
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec node "$DIR/tools/loop-runtime/loopctl.mjs" "$@"
