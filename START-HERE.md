@@ -226,16 +226,26 @@ Phase Goal
 ↓
 loopctl plan
 ↓
-loopctl plan-show
+loopctl plan-show <PLAN-ID>
 ↓
 human review
 ↓
-loopctl plan-approve
+loopctl plan-approve <PLAN-ID>
 ↓
-loopctl ready
+loopctl execute-plan <PLAN-ID>
 ↓
-loopctl execute <READY TASK>
+DONE  /  human-required stop
 ```
+
+`execute-plan` runs the approved Plan's Tasks **one at a time**, in Runtime READY
+order. It reuses the same per-Task loop as `execute` (Worker → Gate → Verifier →
+Diagnose → Retry) and stops immediately at anything that needs a human.
+
+Re-running it after such a stop skips the Tasks that are already DONE and
+continues from the rest. There is no resume flag and none is needed.
+
+`loopctl execute <TASK>` still exists for running a single Task by hand. Use it
+for debugging, not as the normal Phase flow — do not schedule Tasks yourself.
 
 Do not bypass approval boundaries.
 

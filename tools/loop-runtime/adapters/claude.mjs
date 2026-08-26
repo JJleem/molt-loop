@@ -5,7 +5,7 @@
 //   --output-format json         구조화된 최종 결과(사용량 포함)
 //   --append-system-prompt       Runtime이 Result 규약을 덧붙이는 자리
 //   --permission-mode            acceptEdits
-//   --settings <json>            추가 설정(권한 deny 규칙)
+//   --settings <json>            추가 설정(권한 deny/allow 규칙)
 //   --model                      선택
 //   --tools <list>               사용 가능한 built-in tool 집합 자체를 제한 (Verifier 읽기 전용)
 //   --disallowedTools <list>     tool 거부 (Verifier 이중 방어)
@@ -58,16 +58,26 @@ function capture(cmd, args, timeoutMs, { stdin, cwd } = {}) {
 }
 
 /**
- * @param {{context: string, systemPrompt: string, cwd: string, timeoutMs: number, model: string|null, deny: string[]}} opts
+ * Worker 실행.
+ *
+ * `--permission-mode acceptEdits` 는 파일 편집만 자동 승인하고 Bash는 승인하지 않는다.
+ * 그래서 Worker가 self-check를 돌릴 수 있으려면 allow 규칙이 필요하다. Runtime은
+ * self-check 진입점 하나만 allow에 넣는다(worker/policy.mjs) — 임의 명령은 여전히 거부된다.
+ *
+ * @param {{context: string, systemPrompt: string, cwd: string, timeoutMs: number,
+ *          model: string|null, deny: string[], allow: string[]}} opts
  */
-export async function runWorker({ context, systemPrompt, cwd, timeoutMs, model, deny = [] }) {
+export async function runWorker({ context, systemPrompt, cwd, timeoutMs, model, deny = [], allow = [] }) {
   const args = [
     '--print',
     '--output-format', 'json',
     '--permission-mode', 'acceptEdits',
     '--append-system-prompt', systemPrompt,
   ];
-  if (deny.length > 0) args.push('--settings', JSON.stringify({ permissions: { deny } }));
+  const permissions = {};
+  if (deny.length > 0) permissions.deny = deny;
+  if (allow.length > 0) permissions.allow = allow;
+  if (Object.keys(permissions).length > 0) args.push('--settings', JSON.stringify({ permissions }));
   if (model) args.push('--model', model);
 
   const started = Date.now();

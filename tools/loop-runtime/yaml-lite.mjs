@@ -5,7 +5,9 @@
 //
 // 지원: block map · block sequence · 인라인 flow 배열([] / [a, b]) · 주석 · 따옴표 문자열
 //       block scalar(| >, chomping - +) · boolean · null · 정수/실수 · 문자열
+//       큰따옴표 스칼라 안의 이스케이프는 \" 와 \\ 둘뿐이다 (아래 DQ_ESCAPES)
 // 미지원(에러): flow map({}) · anchor/alias · 여러 document · tab 들여쓰기 · 명시적 indent indicator(|2)
+//               그 밖의 이스케이프(\n · \t 등) — 조용히 백슬래시를 남기지 않고 에러를 낸다
 
 export class YamlError extends Error {
   constructor(message, line) {
@@ -26,6 +28,11 @@ function stripComment(s) {
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (quote) {
+      // 큰따옴표 구간 안에서 백슬래시는 다음 한 글자를 이스케이프한다. 그래서 \" 는
+      // 구간을 닫지 않는다. 여기서 인정하는 이스케이프 집합은 DQ_ESCAPES와 같아야 한다 —
+      // 스캐너와 디코더가 서로 다른 문자열을 보면 CI-010 같은 어긋남이 다시 생긴다.
+      // 작은따옴표 구간은 건드리지 않는다(YAML의 작은따옴표는 백슬래시 이스케이프가 없다).
+      if (quote === '"' && c === '\\' && i + 1 < s.length) { i += 1; continue; }
       if (c === quote) quote = null;
     } else if ((c === '"' || c === "'") && opensValue(i)) {
       quote = c;
@@ -93,6 +100,42 @@ function scanLines(text) {
   return out;
 }
 
+/**
+ * 큰따옴표 스칼라에서 인정하는 이스케이프. **이것뿐이다.**
+ * stripComment()의 스캐너가 백슬래시를 이스케이프로 취급하는 집합과 정확히 같아야 한다.
+ */
+const DQ_ESCAPES = { '"': '"', '\\': '\\' };
+
+/**
+ * 큰따옴표 스칼라 본문(따옴표를 뗀 상태)을 실제 문자열로 디코딩한다.
+ *
+ * 지원하지 않는 이스케이프는 백슬래시를 그대로 남기지 않고 에러를 낸다.
+ * 조용히 잘못 읽는 대신 명시적으로 실패한다는 이 파서의 원칙을 따른다 —
+ * CI-010은 정확히 "백슬래시가 그대로 남아 실행 불가능한 명령이 되는" 문제였다.
+ */
+function decodeDoubleQuoted(body, lineNo) {
+  if (!body.includes('\\')) return body;
+  let out = '';
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c !== '\\') { out += c; continue; }
+    const next = body[i + 1];
+    if (next === undefined) {
+      throw new YamlError('dangling escape at the end of a double-quoted scalar', lineNo);
+    }
+    if (!Object.hasOwn(DQ_ESCAPES, next)) {
+      throw new YamlError(
+        `unsupported escape "\\${next}" in a double-quoted scalar `
+        + `(this parser supports only \\" and \\\\)`,
+        lineNo
+      );
+    }
+    out += DQ_ESCAPES[next];
+    i += 1;
+  }
+  return out;
+}
+
 function parseScalar(raw, lineNo) {
   const s = raw.trim();
   if (s === '') return null;
@@ -112,8 +155,11 @@ function parseScalar(raw, lineNo) {
     if (inner === '') return [];
     return inner.split(',').map((p) => parseScalar(p, lineNo));
   }
-  if ((s.startsWith('"') && s.endsWith('"') && s.length > 1) ||
-      (s.startsWith("'") && s.endsWith("'") && s.length > 1)) {
+  if (s.startsWith('"') && s.endsWith('"') && s.length > 1) {
+    return decodeDoubleQuoted(s.slice(1, -1), lineNo);
+  }
+  // 작은따옴표는 이스케이프를 해석하지 않는다. 기존 동작 그대로다.
+  if (s.startsWith("'") && s.endsWith("'") && s.length > 1) {
     return s.slice(1, -1);
   }
   if (/^-?\d+$/.test(s)) return Number.parseInt(s, 10);

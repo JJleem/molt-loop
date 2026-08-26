@@ -6,7 +6,7 @@
 // 매 단계 전에 Task와 Run artifact를 **디스크에서 다시 읽는다.**
 // 앞 단계의 반환값을 유일한 진실로 삼지 않는다 — 그래야 중단·재시작이 안전해진다.
 
-import { writeFileSync, readFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { writeFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAllTasks, isValid, isExample, isPaused, LOCAL_DIR } from '../task-store.mjs';
 import { latestRunForTask } from '../gate/runner.mjs';
@@ -15,7 +15,7 @@ import { resolveNextAction } from './next-action.mjs';
 import { evaluateStop, loopGuardLimit } from './stop-evaluator.mjs';
 import {
   ACTIVE_DIR, allocateExecutionId, buildExecutionReport, buildUsageSummary,
-  writeExecutionReport, executionDir,
+  writeExecutionReport, executionDir, readActiveMarker, classifyActiveMarker,
 } from './execution-report.mjs';
 
 const activeMarker = (taskId) => join(ACTIVE_DIR, `${taskId}.json`);
@@ -27,29 +27,52 @@ const isAlive = (pid) => {
 /**
  * 같은 Task에 대한 명백한 중복 오케스트레이터를 막는 가벼운 표식.
  * **Lease가 아니다.** 죽은 프로세스가 남긴 표식만 안전하게 회수한다.
+ *
+ * 생존 판정의 정본은 **Runtime이 남긴 heartbeat**다. PID는 보조 신호로만 본다 —
+ * 부모 없는 좀비 프로세스는 `kill(pid, 0)` 에 계속 성공해서, PID만 보면 이미 끝난
+ * 실행이 영원히 살아 있는 것으로 보인다(OBS-006).
  */
-export function claimExecution(taskId) {
+export function claimExecution(taskId, { now = Date.now() } = {}) {
   mkdirSync(ACTIVE_DIR, { recursive: true });
   const p = activeMarker(taskId);
   if (existsSync(p)) {
-    let prev = null;
-    try { prev = JSON.parse(readFileSync(p, 'utf8')); } catch { prev = null; }
-    if (prev === null) {
+    const prev = readActiveMarker(taskId);
+    if (prev === null || prev.corrupt) {
       return { ok: false, reason: `an execution marker for ${taskId} exists but is unreadable; resolve it manually (${p}).` };
     }
-    if (Number.isInteger(prev.pid) && prev.pid !== process.pid && isAlive(prev.pid)) {
-      return { ok: false, reason: `${taskId} is already being executed by ${prev.execution_id} (pid ${prev.pid}).` };
+    const liveness = classifyActiveMarker(prev, { now });
+    const pidAlive = Number.isInteger(prev.pid) && prev.pid !== process.pid && isAlive(prev.pid);
+    if (liveness.state === 'RUNNING' && pidAlive) {
+      return {
+        ok: false,
+        reason: `${taskId} is already being executed by ${prev.execution_id} (pid ${prev.pid}, ${liveness.reason}).`,
+      };
     }
-    // 프로세스가 이미 없다 -> 앞선 실행이 죽으면서 남긴 표식이다. 회수한다.
-    return { ok: true, reclaimed: prev.execution_id ?? null, path: p };
+    // heartbeat가 끊겼거나 프로세스가 없다 -> 앞선 실행이 남긴 표식이다. 회수한다.
+    return { ok: true, reclaimed: prev.execution_id ?? null, path: p, staleReason: liveness.reason };
   }
   return { ok: true, reclaimed: null, path: p };
 }
 
-export function writeClaim(taskId, execId) {
+/**
+ * 표식을 쓰거나 갱신한다. 매 단계마다 불러서 heartbeat와 현재 단계를 남긴다.
+ * status가 읽는 것은 이 파일이지 프로세스 테이블이 아니다.
+ */
+export function writeClaim(taskId, execId, progress = {}) {
   mkdirSync(ACTIVE_DIR, { recursive: true });
+  const existing = readActiveMarker(taskId);
+  const startedAt = (existing && !existing.corrupt && existing.execution_id === execId)
+    ? existing.started_at
+    : new Date().toISOString();
   writeFileSync(activeMarker(taskId), `${JSON.stringify({
-    task_id: taskId, execution_id: execId, pid: process.pid, started_at: new Date().toISOString(),
+    task_id: taskId,
+    execution_id: execId,
+    pid: process.pid,
+    started_at: startedAt,
+    heartbeat_at: new Date().toISOString(),
+    stage: progress.stage ?? (existing && !existing.corrupt ? existing.stage : null) ?? 'starting',
+    run_id: progress.run_id ?? (existing && !existing.corrupt ? existing.run_id : null) ?? null,
+    attempt: progress.attempt ?? (existing && !existing.corrupt ? existing.attempt : null) ?? null,
   }, null, 2)}\n`, 'utf8');
 }
 
@@ -85,6 +108,8 @@ export async function executeTask({ taskId, config, emit = () => {}, isInterrupt
   const record = (stage, extra) => {
     const e = { stage, ...extra };
     events.push(e);
+    // 표식을 매 단계 갱신한다 — 진행 중 상태가 디스크에 남아야 세션이 끊겨도 복원된다.
+    writeClaim(taskId, execId, { stage, run_id: e.run_id ?? null, attempt: e.attempt ?? null });
     emit(e);
     return e;
   };

@@ -98,11 +98,13 @@ adapters/
   mock.mjs           Runtime 테스트용 test double (LLM 호출 없음)
 worker/
   runner.mjs         Worker 1회 실행 · 보호 파일 무결성 검사 · Runtime Envelope 작성
+  policy.mjs         Worker 권한 경계 한 곳 — deny 규칙 · fingerprint 예외 · self-check allow
   result.mjs         Worker Result 계약과 검증
   telemetry.mjs      Runtime이 관찰한 사용량 (LLM 호출 없음)
 gate/
   resolver.mjs       Gate 설정 로드 · Task별 필수 Gate 계산 · 참조 검증
   runner.mjs         Run 해석 · 실행 자격 검사 · subprocess 실행 · VERIFY_READY 파생
+  self-check.mjs     Worker용 참고 실행 — 설정된 Gate 명령만, Report를 만들지 않는다
   report.mjs         Gate Report 구성 · 저장 · 재실행 시 이전 증거 보존
 verifier/
   runner.mjs         자격 검사 · 독립 Verifier 1회 실행 · 읽기 전용 무결성 검사 · Envelope
@@ -117,10 +119,12 @@ recovery/
   limits.mjs         재시도 예산 (policies/limits.yaml 하나에서만 온다)
 stages.mjs           단계 실행의 단일 진입점 — 수동 CLI와 자동 루프가 같이 쓴다
 loop/
-  orchestrator.mjs   Task 하나를 정지 조건까지 자동 실행
+  orchestrator.mjs   Task 하나를 정지 조건까지 자동 실행 · 활성 표식 heartbeat
+  plan-executor.mjs  승인된 Plan의 Task를 한 번에 하나씩 (결정론적 · 추가 LLM 호출 없음)
+  reconcile.mjs      사람이 CLI로 끝낸 복구를 Execution Report로 기록
   next-action.mjs    다음 합법 행동 결정 (결정론적) · 정체 감지
   stop-evaluator.mjs 정지 판단을 한 곳에 모은다
-  execution-report.mjs  Execution ID · 실행 보고서 · 사용량 요약
+  execution-report.mjs  Execution ID · 실행 보고서 · 사용량 요약 · 활성 표식 판정
 planner/
   runner.mjs         Planner 1회 실행 · 읽기 전용 무결성 검사 · Planner Envelope
   result.mjs         Planner Result 계약 · 구조화 출력 스키마 · Planner 규약
@@ -161,6 +165,8 @@ test/
 ./loopctl verify TASK-001        # 독립 Verifier 1회 실행 --rerun --adapter --model --timeout
 ./loopctl retry TASK-001         # 진단 기반 Worker 재시도 1회
 ./loopctl execute TASK-001       # DONE 또는 정지 조건까지 자동 실행
+./loopctl execute-plan PLAN-...  # 승인된 Plan의 Task를 한 번에 하나씩 순차 실행
+./loopctl self-check [build ...] # 설정된 Gate 명령만 참고용으로 실행 (판정 아님)
 
 ./loopctl diagnose TASK-001      # 실패 진단 + Failure Memo (AI 호출 없음)
 ./loopctl execution TASK-001     # 기록된 Execution Report
@@ -790,6 +796,7 @@ DONE · BLOCKED · 한도 소진 · 정체 감지 · 회복 불명확 · 사람 
 ```
 
 Task **하나만** 실행한다. READY Task를 전부 돌리지 않는다(공유 작업 트리라 모호해진다).
+승인된 Plan 단위로 이어서 돌리려면 `execute-plan`을 쓴다 — 그것도 한 번에 Task 하나씩이다.
 `execute-all` · `auto` · `daemon`은 없다. 낮은 수준 명령은 디버깅·수동 제어용으로 그대로 남아 있다.
 
 ### 오케스트레이터는 조합만 한다
@@ -1141,10 +1148,14 @@ node --test "tools/loop-runtime/test/*.test.mjs"
 
 ## 아직 구현되지 않은 것 (다음 단계)
 
-Replan/Decompose 실행 · 다중 Task 스케줄링 · Queue ·
-Lease locking · Worktree · immutable staging ref ·
-main 병합 · Parallel Worker/Gate/Verifier · Verifier 합의(voting) ·
-Budget/비용 정책 · 단계 간 비용 합산 · Monitor.
+`loopctl resume` · Replan/Decompose 실행 · Queue · Lease locking ·
+per-Task Worktree 격리 · immutable staging ref · main 병합 ·
+Parallel Task 실행 · Parallel Worker/Gate/Verifier · Verifier 합의(voting) ·
+sub-agent · Research Agent · Debug Agent ·
+Goal 자동 승인 · Phase 자동 승인 · multi-Phase full-auto ·
+Budget hard limit · cost/token cap · 단계 간 비용 합산 · Monitor.
+
+(`execute-plan`은 V0.1에서 구현되었다. 승인된 Plan의 Task를 **한 번에 하나씩** 순차 실행한다.)
 
 Verifier 층에서 의도적으로 미룬 것:
 
@@ -1170,11 +1181,12 @@ Full Loop에서 의도적으로 미룬 것:
 
 Goal Planner 층에서 의도적으로 미룬 것:
 
-- **자동 실행 없음.** `Goal -> Plan -> Approve -> 전부 실행` 사슬을 만들지 않았다.
-  승인은 Task를 만들고 거기서 멈춘다. 실행 결정은 여전히 명시적이다.
-- **다중 Task 스케줄러 없음.** Plan에 의존 관계가 생겼지만 `execute-plan` · `execute-all` ·
-  queue · scheduler는 없다. 운영자는 여전히 Task를 하나씩 실행한다.
-  의존 인식 READY는 Plan을 **안전하게** 만들기 위한 것이지 자동 실행을 위한 것이 아니다.
+- **자동 승인 없음.** `Goal -> Plan -> 전부 실행` 사슬을 만들지 않았다. 승인은 여전히 사람이 한다.
+  `plan-approve` 없이는 Task가 만들어지지 않고, 실행은 `execute-plan`을 명시적으로 불러야 시작된다.
+  (V0.1에서 `execute-plan`이 추가되어 **승인된** Plan은 한 번에 하나씩 순차 실행할 수 있다.
+   V0에서 미뤄 두었던 항목이며, Phase 1 field-test 이후 구현·검증되었다.)
+- **Queue · scheduler · 병렬 실행 없음.** `execute-plan`은 공유 작업 트리에서 Task를
+  **한 번에 하나씩** 돌린다. `execute-all` · daemon · worktree 격리는 여전히 없다.
 - **자동 Replan 없음.** Step 6/7의 `REPLAN_REQUIRED` 를 이 Planner로 넘기지 않는다.
   이 Planner는 새 Goal만 다룬다.
 - **대화형 계획 없음.** `NEEDS_HUMAN` 은 질문을 돌려주고 끝난다. 답을 받아 이어서 계획하는

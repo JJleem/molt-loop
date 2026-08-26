@@ -160,8 +160,12 @@ export function checkEligibility({ task, run, config }) {
 /**
  * Gate 하나를 Runtime 소유 subprocess로 실행한다.
  * 명령 문자열은 Runtime 설정에서만 오고, 여기서 조립되거나 확장되지 않는다.
+ *
+ * Worker self-check(gate/self-check.mjs)도 이 함수를 그대로 쓴다 — 같은 명령을
+ * 두 가지 방식으로 실행하는 경로를 만들지 않기 위해서다. 다만 self-check는
+ * Run 디렉터리가 아닌 scratch 디렉터리를 주고, Gate Report를 만들지 않는다.
  */
-function executeGate({ def, runDir, timeoutSeconds }) {
+export function executeGate({ def, runDir, timeoutSeconds }) {
   const dir = gateDir(runDir, def.name);
   mkdirSync(dir, { recursive: true });
   const stdoutPath = join(dir, 'stdout.log');

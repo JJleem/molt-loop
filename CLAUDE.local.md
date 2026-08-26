@@ -41,10 +41,21 @@ Primary commands:
 - `.\loopctl plan`
 - `.\loopctl plan-show`
 - `.\loopctl plan-approve`
+- `.\loopctl execute-plan`
 - `.\loopctl execute`
 - `.\loopctl execution`
 - `.\loopctl usage`
 - `.\loopctl doctor`
+
+`execute-plan` is the normal way to run an approved Plan. It calls the same
+`execute` loop for one Task at a time, in Runtime READY order.
+
+Do not act as the scheduler yourself. Picking Tasks one by one and calling
+`execute` on each is the manual fallback, not the default: the Runtime already
+owns READY evaluation, dependency order, and the stop conditions.
+
+`self-check` exists for the Worker, not for this session. It runs configured
+Gate commands for reference only and never decides completion.
 
 Do not bypass Runtime-controlled behavior:
 
@@ -102,8 +113,9 @@ For each Phase:
 4. Stop before approval and let the user review the Plan.
 5. After explicit approval, run `plan-approve`.
 6. Inspect `loopctl ready`.
-7. Execute only READY Tasks.
-8. Let `loopctl execute` own:
+7. Run `loopctl execute-plan <PLAN-ID>`.
+8. Let the Runtime own everything inside that:
+   - Task selection and READY order
    - Worker
    - Gate
    - Verifier
@@ -123,12 +135,17 @@ Do not automatically approve a Plan unless the user explicitly asks.
 
 Do not automatically execute a newly approved Plan unless the user explicitly asks to proceed.
 
-If the user asks to continue the entire currently approved Phase, continue sequentially through READY Tasks until:
+If the user asks to continue the entire currently approved Phase, run
+`loopctl execute-plan <PLAN-ID>`. It runs one Task at a time until:
 
-- all Phase Tasks are DONE, or
-- Runtime reaches a stop that requires human judgment.
+- all Plan Tasks are DONE, or
+- the Runtime reaches a stop that requires human judgment.
 
-Do not execute READY Tasks concurrently while they share the same working tree.
+Re-running the same command after a human stop skips the Tasks that are already
+DONE and continues from the remaining ones. It does not need a resume flag.
+
+Do not execute Tasks concurrently while they share the same working tree.
+The Runtime refuses it, and so should this session.
 
 ---
 
@@ -138,7 +155,7 @@ Runtime subject integrity has priority over interactive convenience.
 
 Do not modify project files while:
 
-- `loopctl execute` is active
+- `loopctl execute` or `loopctl execute-plan` is active
 - a Gate is running
 - a Verifier is running
 - a Task is awaiting verification against an already-created Gate subject
@@ -175,6 +192,7 @@ After meaningful events such as:
 
 - `loopctl plan`
 - `loopctl plan-approve`
+- `loopctl execute-plan`
 - `loopctl execute`
 - retry or recovery
 - `NEEDS_HUMAN`

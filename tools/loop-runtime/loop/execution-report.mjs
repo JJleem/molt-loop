@@ -13,6 +13,18 @@ export const ACTIVE_DIR = join(EXECUTIONS_DIR, 'active');
 export const REPORT_FILE = 'execution-report.json';
 export const REPORT_SCHEMA = 1;
 
+/**
+ * 활성 표식이 살아 있다고 볼 수 있는 heartbeat 유예.
+ *
+ * PID 생존만으로 판단하지 않는다. 부모가 없는 좀비 프로세스는 `kill(pid, 0)` 에 계속
+ * 성공하므로, 끝난 실행을 영원히 "실행 중"으로 보이게 만든다(OBS-006에서 실측).
+ * Runtime이 스스로 남기는 heartbeat가 정본이고, PID는 보조 신호다.
+ */
+export const HEARTBEAT_STALE_MS = 5 * 60 * 1000;
+
+/** 실행 결과가 아직 나오지 않은 상태. Report의 result와 같은 공간에 두지 않는다. */
+export const ACTIVE_STATES = ['RUNNING', 'STALE'];
+
 /** 실행 결과. Task YAML 상태가 아니라 오케스트레이션 결과다. */
 export const EXECUTION_RESULTS = [
   'DONE', 'BLOCKED', 'NEEDS_HUMAN', 'LIMIT_REACHED', 'STALLED', 'INTERRUPTED', 'FAILED',
@@ -111,11 +123,17 @@ export function buildUsageSummary(runDirsByRunId) {
 
 export function buildExecutionReport({
   execId, taskId, startedAt, finishedAt, result, stopReason, attempts, events, usageSummary, finalStatus, guard,
+  origin = 'orchestrator', supersedes = null, stages = null,
 }) {
   return {
     schema: REPORT_SCHEMA,
     execution_id: execId,
     task_id: taskId,
+    // 이 실행을 누가 몰았는가. `manual` 은 사람이 CLI 단계를 직접 이어붙인 복구다.
+    origin,
+    // 사람이 이어받아 끝낸 경우, 그 전에 멈춰 있던 실행. 그 기록을 고쳐 쓰지는 않는다.
+    supersedes,
+    manual_stages: stages,
 
     started_at: startedAt.toISOString(),
     finished_at: finishedAt.toISOString(),
@@ -153,6 +171,56 @@ export function listExecutions() {
     .filter((e) => e.isDirectory() && e.name.startsWith('EXEC-'))
     .map((e) => e.name)
     .sort();
+}
+
+// ------------------------------------------------------------------
+// 활성 실행 표식 — 진행 중인 실행을 Runtime 소유 상태로 드러낸다.
+//
+// 표식은 실행 시작 시점에 쓰이고 매 단계마다 갱신된다. 종료 시 지워진다.
+// 그래서 크래시·세션 단절 후에도 "무엇이 어디까지 갔는가"가 디스크에 남는다.
+// ------------------------------------------------------------------
+
+const activeMarkerPath = (taskId) => join(ACTIVE_DIR, `${taskId}.json`);
+
+export function readActiveMarker(taskId) {
+  const p = activeMarkerPath(taskId);
+  if (!existsSync(p)) return null;
+  try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return { corrupt: true, task_id: taskId }; }
+}
+
+export function listActiveMarkers() {
+  if (!existsSync(ACTIVE_DIR)) return [];
+  return readdirSync(ACTIVE_DIR, { withFileTypes: true })
+    .filter((e) => e.isFile() && e.name.endsWith('.json'))
+    .map((e) => e.name.slice(0, -'.json'.length))
+    .sort()
+    .map((taskId) => ({ taskId, marker: readActiveMarker(taskId) }))
+    .filter((m) => m.marker !== null);
+}
+
+/**
+ * 표식이 살아 있는 실행인지 판정한다. **heartbeat가 정본이다.**
+ * PID는 참고로만 보고한다 — 좀비 프로세스가 있으면 PID는 거짓말을 한다.
+ *
+ * @returns {{ state: 'RUNNING'|'STALE', age_ms: number|null, reason: string }}
+ */
+export function classifyActiveMarker(marker, { now = Date.now(), staleAfterMs = HEARTBEAT_STALE_MS } = {}) {
+  if (!marker || marker.corrupt) {
+    return { state: 'STALE', age_ms: null, reason: 'the marker is unreadable' };
+  }
+  const beat = Date.parse(marker.heartbeat_at ?? marker.started_at ?? '');
+  if (!Number.isFinite(beat)) {
+    return { state: 'STALE', age_ms: null, reason: 'the marker carries no usable heartbeat' };
+  }
+  const age = now - beat;
+  if (age > staleAfterMs) {
+    return {
+      state: 'STALE',
+      age_ms: age,
+      reason: `no heartbeat for ${Math.round(age / 1000)}s (limit ${Math.round(staleAfterMs / 1000)}s)`,
+    };
+  }
+  return { state: 'RUNNING', age_ms: age, reason: `heartbeat ${Math.round(age / 1000)}s ago` };
 }
 
 /** Task의 가장 최근 실행 보고서. status/execution 명령이 쓴다. */

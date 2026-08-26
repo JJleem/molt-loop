@@ -123,6 +123,25 @@ function renderRuntimeFacts({ runId, task, envelope, subject, diff, gateReport }
   lines.push(`gate result: ${gateReport.result}`);
   lines.push(`canonical diff files: ${diff.files.length}${diff.truncated ? ' (some content omitted — see notes)' : ''}`);
   for (const n of diff.notes) lines.push(`  note: ${n}`);
+
+  // Runtime이 이 Run에서 **실제로 목격한 실행**. 여기 없는 실행은 일어나지 않은 것으로 다룬다.
+  // 산출물이 그런 실행을 했다고 서술하더라도 그것은 서술일 뿐 증거가 아니다.
+  lines.push('');
+  lines.push('WITNESSED EXECUTION (the runtime ran exactly these commands for this run):');
+  if (gateReport.gates.length === 0) {
+    lines.push('  (none — this task requires no deterministic gate)');
+  }
+  for (const g of gateReport.gates) {
+    lines.push(`  ${g.command}   -> ${g.status} (exit ${g.exit_code ?? 'none'})`);
+  }
+  lines.push('');
+  lines.push('NOT WITNESSED BY THE RUNTIME for this run:');
+  lines.push('  manual operation by a person · a browser session · a dev server · network access ·');
+  lines.push('  any external service call · rendering or measuring a real asset.');
+  lines.push('  The worker could execute nothing except the runtime self-check entry point,');
+  lines.push('  which runs only the gate commands listed above.');
+  lines.push('  Any acceptance criterion that needs one of these, and any claim in a changed file');
+  lines.push('  that one of these happened, is unsupported by runtime evidence.');
   return lines.join('\n');
 }
 

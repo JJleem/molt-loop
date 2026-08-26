@@ -18,12 +18,18 @@ const WORKER_OK = JSON.stringify({
 });
 const VERIFIER_PASS = JSON.stringify({
   run_id: '__RUN__', task_id: '__TASK__', verification_subject_sha256: '__SUBJECT__',
-  result: 'PASS', criteria: [{ id: 'AC1', status: 'PASS', reason: 'the diff shows it' }],
+  result: 'PASS', criteria: [{
+    id: 'AC1', status: 'PASS', reason: 'the repository already contains it',
+    evidence_basis: 'repository_content', evidence_refs: ['.loop/tasks/__TASK__.yaml'],
+  }],
   failed_criteria: [], reason: 'all criteria hold',
 });
 const VERIFIER_FAIL = JSON.stringify({
   run_id: '__RUN__', task_id: '__TASK__', verification_subject_sha256: '__SUBJECT__',
-  result: 'FAIL', criteria: [{ id: 'AC1', status: 'FAIL', reason: 'nothing implements it' }],
+  result: 'FAIL', criteria: [{
+    id: 'AC1', status: 'FAIL', reason: 'nothing implements it',
+    evidence_basis: 'canonical_diff', evidence_refs: [],
+  }],
   failed_criteria: ['AC1'], reason: 'AC1 is not implemented',
 });
 

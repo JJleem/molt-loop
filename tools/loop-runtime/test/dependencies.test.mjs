@@ -153,7 +153,10 @@ test('existing runtime behaviour is unchanged for dependency-free tasks', () => 
     const verify = p.run(['verify', 'TASK-001'], {
       LOOP_MOCK_VERIFIER: JSON.stringify({
         run_id: '__RUN__', task_id: '__TASK__', verification_subject_sha256: '__SUBJECT__',
-        result: 'PASS', criteria: [{ id: 'AC1', status: 'PASS', reason: 'the diff shows it' }],
+        result: 'PASS', criteria: [{
+          id: 'AC1', status: 'PASS', reason: 'the repository already contains it',
+          evidence_basis: 'repository_content', evidence_refs: ['.loop/tasks/__TASK__.yaml'],
+        }],
         failed_criteria: [], reason: 'all criteria hold',
       }),
     });

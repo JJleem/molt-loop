@@ -26,6 +26,7 @@ import {
   checkVerifierEligibility, runVerifierOnce, verificationDirFor,
   readVerificationReport, archivePriorVerification,
 } from './verifier/runner.mjs';
+import { resolveSelfCheckGates, runSelfCheck, SELF_CHECK_DIR } from './gate/self-check.mjs';
 import { REPORT_SCHEMA as GATE_REPORT_SCHEMA } from './gate/report.mjs';
 import { REPORT_SCHEMA as VERIFICATION_REPORT_SCHEMA } from './verifier/report.mjs';
 import { latestRunForTask } from './gate/runner.mjs';
@@ -35,10 +36,17 @@ import {
   startFirstAttempt, startRetryAttempt, stageWorker, stageGate, stageVerify,
 } from './stages.mjs';
 import { executeTask, claimExecution } from './loop/orchestrator.mjs';
-import { readExecutionReport, latestExecutionFor, executionDir } from './loop/execution-report.mjs';
+import {
+  readExecutionReport, latestExecutionFor, executionDir, listActiveMarkers, readActiveMarker,
+  classifyActiveMarker, HEARTBEAT_STALE_MS,
+} from './loop/execution-report.mjs';
+import { recordManualExecution, shouldRecordManualExecution } from './loop/reconcile.mjs';
 import { runPlannerOnce } from './planner/runner.mjs';
 import { approvePlan } from './planner/approval.mjs';
 import { loadPlan, listPlans, resolvePlanRef, PLANS_DIR } from './planner/store.mjs';
+import {
+  resolveExecutablePlan, executePlan, writePlanExecutionReport, listPlanExecutions,
+} from './loop/plan-executor.mjs';
 import { PLAN_REPORT_SCHEMA } from './planner/report.mjs';
 
 const rel = (p) => relative(ROOT, p).split('\\').join('/');
@@ -663,6 +671,27 @@ async function cmdVerify(ref, ...flags) {
     return;
   }
   console.log(`\n${task.id}: ${executed.transition.from} -> ${executed.transition.to}`);
+
+  // 사람이 CLI로 이어 붙인 복구도 실행이다. 기록이 없으면 "latest execution"이
+  // 멈춰 있던 옛 결과를 계속 가리킨다(OBS-004). 앞선 Report는 고치지 않는다.
+  const should = shouldRecordManualExecution(task.id);
+  if (should.record) {
+    const rec = recordManualExecution({
+      taskId: task.id,
+      run,
+      stages: ['gate', 'verify'],
+      finalStatus: executed.transition.to,
+      startedAt: new Date(env.started_at),
+      events: [
+        { stage: 'verifier', run_id: run.runId, result: report.result, verifier_result: report.verifier_result ?? 'INVALID' },
+        { stage: 'stop', result: 'DONE', reason: 'MANUAL_RECOVERY' },
+      ],
+    });
+    console.log(`Recorded this manual recovery as ${rec.execId}`);
+    if (rec.supersedes) {
+      console.log(`  it supersedes ${rec.supersedes}, which stays exactly as it was recorded`);
+    }
+  }
 }
 
 /** verification — 이미 기록된 Verification Report를 보여준다. 새 Verifier를 부르지 않는다. */
@@ -733,7 +762,26 @@ function cmdStatus() {
   const executionLine = (taskId) => {
     const found = latestExecutionFor(taskId);
     if (!found) return null;
-    return `latest execution: ${found.report.result}  (${found.report.stop_reason})`;
+    const r = found.report;
+    const origin = r.origin === 'manual' ? ' [manual recovery]' : '';
+    // Report는 고쳐 쓰지 않는다. 그 뒤에 Task가 움직였다면 그 사실만 덧붙인다.
+    const task = tasks.find((t) => t.id === taskId);
+    const moved = task && r.final_task_status && task.data.status !== r.final_task_status
+      ? `  [superseded — task is now ${task.data.status}]`
+      : '';
+    return `latest execution: ${r.result}  (${r.stop_reason})${origin}${moved}`;
+  };
+
+  /** 진행 중인 실행. Runtime이 남긴 표식만 읽는다 — 프로세스 테이블을 보지 않는다. */
+  const activeLine = (taskId) => {
+    const marker = readActiveMarker(taskId);
+    if (!marker) return null;
+    const live = classifyActiveMarker(marker);
+    const where = marker.corrupt
+      ? ''
+      : `  stage: ${marker.stage ?? 'starting'}${marker.run_id ? `  run: ${marker.run_id}` : ''}`
+        + `${marker.attempt ? `  attempt: ${marker.attempt}` : ''}`;
+    return `execution ${live.state}: ${marker.execution_id ?? '(unknown)'}  (${live.reason})${where}`;
   };
 
   /** REVIEW인 Task 하나에 대한 파생 사실. 비싼 작업은 하지 않는다(파일 읽기 + git status). */
@@ -770,9 +818,10 @@ function cmdStatus() {
 
   /** Worker 단계에서 멈춘 Task. 실패했다면 기록된 진단을 그대로 보여준다. */
   const inProgressDetail = (t) => {
+    const activeNow = activeLine(t.id);
     const run = latestRunForTask(t.id);
-    if (!run) return ['latest run: (none)'];
-    const lines = [`latest run: ${run.runId}`];
+    if (!run) return activeNow ? [activeNow, 'latest run: (none)'] : ['latest run: (none)'];
+    const lines = activeNow ? [activeNow, `latest run: ${run.runId}`] : [`latest run: ${run.runId}`];
     const d = readDiagnosis(run.runDir);
     if (d && !d.corrupt && d.failure_class !== null && d.stage === 'worker') {
       lines.push(`worker: failed (${d.failure_class})`);
@@ -792,10 +841,27 @@ function cmdStatus() {
 
   const plain = (t) => {
     const head = `  ${t.id.padEnd(20)} ${oneLine(t.data.request, 52)}`;
-    const ex = executionLine(t.id);
-    return ex ? `${head}\n      ${ex}` : head;
+    const lines = [activeLine(t.id), executionLine(t.id)].filter(Boolean);
+    return lines.length > 0 ? `${head}\n      ${lines.join('\n      ')}` : head;
   };
   const inState = (st) => valid.filter((t) => t.data.status === st && !isExample(t));
+
+  // 진행 중인 실행을 가장 먼저 보여준다. 세션이 끊긴 뒤 가장 먼저 알아야 하는 사실이다.
+  const active = listActiveMarkers();
+  if (active.length > 0) {
+    console.log('ACTIVE EXECUTION');
+    for (const { taskId, marker } of active) {
+      const live = classifyActiveMarker(marker);
+      console.log(`  ${taskId.padEnd(20)} ${live.state}`);
+      console.log(`      ${activeLine(taskId)}`);
+      if (live.state === 'STALE') {
+        console.log(`      the runtime stopped updating this marker; \`loopctl execute ${taskId}\` will reclaim it`);
+      }
+    }
+    console.log(`  (liveness comes from the runtime's own heartbeat, not from process liveness;`
+      + ` stale after ${Math.round(HEARTBEAT_STALE_MS / 1000)}s)`);
+    console.log('');
+  }
 
   section('READY', valid.filter((t) => readySet.has(t.id)).map(plain));
 
@@ -1150,6 +1216,133 @@ async function cmdExecute(id, ...flags) {
   if (r.result !== 'DONE') process.exitCode = 1;
 }
 
+/**
+ * execute-plan — 승인된 Plan의 Task를 **한 번에 하나씩** 끝까지 실행한다.
+ *
+ * 오케스트레이션 판단(다음에 무엇을 실행할지)은 전부 결정론적이며 LLM을 부르지 않는다.
+ * Task 하나의 Worker · Gate · Verifier · Diagnose · Retry는 `execute`가 그대로 소유한다.
+ * shared working tree이므로 Task를 동시에 실행하지 않는다.
+ *
+ * 같은 명령을 다시 실행하면 남은 Task부터 이어간다 — Task 상태가 곧 재시작 지점이다.
+ */
+async function cmdExecutePlan(ref, ...flags) {
+  const USAGE_LINE = 'usage: loopctl execute-plan <PLAN> [--timeout <seconds>] [--adapter <name>] [--model <model>]';
+  if (!ref) return usageError(USAGE_LINE);
+  const VALUED = new Set(['--timeout', '--adapter', '--model', '--verifier-adapter', '--verifier-model']);
+  const opt = (n) => { const i = flags.indexOf(`--${n}`); return i === -1 ? null : flags[i + 1]; };
+  for (let i = 0; i < flags.length; i += 1) {
+    if (VALUED.has(flags[i])) { i += 1; continue; }
+    return usageError(`unknown option: ${flags[i]}\n${USAGE_LINE}`);
+  }
+
+  const resolvedRef = resolvePlanRef(ref);
+  if (!resolvedRef.ok) return fail(resolvedRef.reason);
+  const plan = resolveExecutablePlan(resolvedRef.planId);
+  if (!plan.ok) return fail(plan.reason);
+
+  if (isPaused()) {
+    return fail(`PAUSE is active (${rel(join(LOCAL_DIR, 'PAUSE'))}).\n  Remove that file to execute tasks.`);
+  }
+
+  const config = loadConfig();
+  if (opt('adapter')) config.runtime.worker_adapter = opt('adapter');
+  if (opt('model')) config.runtime.worker_model = opt('model');
+  if (opt('verifier-adapter')) config.runtime.verifier_adapter = opt('verifier-adapter');
+  if (opt('verifier-model')) config.runtime.verifier_model = opt('verifier-model');
+  let deadlineMs = null;
+  if (opt('timeout')) {
+    const t = Number(opt('timeout'));
+    if (!Number.isInteger(t) || t < 1) return usageError('--timeout must be an integer >= 1 (seconds)');
+    deadlineMs = Date.now() + t * 1000;
+  }
+
+  let interrupted = false;
+  const onSigint = () => {
+    if (interrupted) process.exit(130);
+    interrupted = true;
+    console.log('\n(interrupt requested — finishing the current task, then stopping. Ctrl+C again to abort now.)');
+  };
+  process.on('SIGINT', onSigint);
+
+  console.log(`Plan: ${plan.planId}`);
+  console.log(`Tasks: ${plan.taskIds.join(', ')}`);
+  console.log('One task at a time — this runtime shares one working tree.');
+
+  let currentAttempt = null;
+  const emit = (e) => {
+    switch (e.event) {
+      case 'task-start':
+        currentAttempt = null;
+        console.log(`\n${'='.repeat(56)}`);
+        console.log(`Task: ${e.task_id}`);
+        break;
+      case 'task-end':
+        console.log(`\n${e.task_id}: ${e.result}  (${e.execution_id})`);
+        break;
+      case 'stage':
+        if (e.stage === 'worker') {
+          if (e.attempt !== currentAttempt) {
+            currentAttempt = e.attempt;
+            console.log(`\nAttempt ${e.attempt}`);
+          }
+          console.log('  [Worker] ' + (e.failures?.length ? `failed: ${e.failures.join('; ')}` : `success -> ${e.result}`));
+        } else if (e.stage === 'gate') {
+          console.log(`  [Gate] ${e.result}  (${e.gates.map((g) => `${g.name} ${g.status}`).join(', ') || 'none required'})`);
+        } else if (e.stage === 'verifier') {
+          console.log(`  [Verifier] ${e.verifier_result}  (verification: ${e.result})`);
+        } else if (e.stage === 'diagnose') {
+          console.log(`  [Diagnose] ${e.result} -> ${e.action}`);
+        }
+        break;
+      default:
+        break;
+    }
+  };
+
+  let run;
+  try {
+    run = await executePlan({
+      planId: plan.planId, taskIds: plan.taskIds, config, emit, deadlineMs,
+      isInterrupted: () => interrupted,
+    });
+  } finally {
+    process.off('SIGINT', onSigint);
+  }
+
+  const written = writePlanExecutionReport(plan.planId, run);
+  const u = written.report.usage_summary;
+
+  console.log(`\n${'='.repeat(56)}`);
+  console.log(`Plan Execution: ${written.report.plan_execution_id}`);
+  console.log(`Plan Result: ${run.result}   stop_reason: ${run.stopReason}`);
+  if (run.detail) console.log(`  ${run.detail}`);
+  console.log(`Duration: ${fmtDuration(written.report.duration_ms)}`);
+  console.log('');
+  console.log('Tasks executed this run:');
+  if (run.executions.length === 0) console.log('  (none)');
+  for (const e of run.executions) {
+    console.log(`  ${e.task_id.padEnd(20)} ${e.result.padEnd(12)} attempts=${e.attempts}  ${fmtDuration(e.duration_ms)}  ${e.execution_id}`);
+  }
+  console.log('');
+  console.log(`LLM invocations: ${u.llm_invocations} · gate runs: ${u.gate_invocations}`
+    + ` · orchestration llm calls: ${written.report.orchestration_llm_calls}`);
+  if (u.provider_cost_usd_known !== null) {
+    console.log(`Provider-reported cost (known): $${u.provider_cost_usd_known.toFixed(4)}`
+      + `${u.executions_with_unknown_cost > 0 ? `  (+${u.executions_with_unknown_cost} execution(s) with unknown cost)` : ''}`);
+  }
+  console.log(`Report: ${rel(written.path)}`);
+
+  if (run.result !== 'DONE') {
+    console.log('');
+    console.log('Inspect:');
+    console.log(`  loopctl status`);
+    const last = run.executions[run.executions.length - 1];
+    if (last) console.log(`  loopctl diagnose ${last.task_id}`);
+    console.log(`  re-running \`loopctl execute-plan ${plan.planId}\` resumes from the remaining tasks`);
+    process.exitCode = 1;
+  }
+}
+
 /** execution — 기록된 Execution Report를 보여준다. AI 호출도 상태 변경도 없다. */
 function cmdExecution(ref) {
   if (!ref) return usageError('usage: loopctl execution <EXEC-ID|TASK>');
@@ -1169,8 +1362,12 @@ function cmdExecution(ref) {
   }
   if (report.corrupt) return fail(`${execId}: execution-report.json is corrupt`);
 
-  console.log(`${report.execution_id}  task=${report.task_id}`);
+  console.log(`${report.execution_id}  task=${report.task_id}${report.origin === 'manual' ? '  origin: manual recovery' : ''}`);
   console.log(`result: ${report.result}   stop_reason: ${report.stop_reason}   task status: ${report.final_task_status}`);
+  if (report.supersedes) console.log(`supersedes: ${report.supersedes}  (that report is left exactly as it was recorded)`);
+  if (Array.isArray(report.manual_stages) && report.manual_stages.length > 0) {
+    console.log(`manual stages: ${report.manual_stages.join(' -> ')}`);
+  }
   console.log(`duration: ${fmtDuration(report.duration_ms)}   stage transitions: ${report.stage_transitions} / guard ${report.loop_guard.limit}`);
   console.log('');
   console.log('attempts:');
@@ -1505,6 +1702,61 @@ async function cmdAdapters() {
 }
 
 /** gates — 설정된 Gate 조회. 실행하지 않는다. */
+/**
+ * self-check — Worker가 스스로 돌려보는 결정론적 검사. **정본 Gate 실행이 아니다.**
+ *
+ * 실행 가능한 명령은 project.yaml의 gates 블록에서만 온다. 인자는 Gate 이름일 뿐이며
+ * 명령 문자열이 아니다 — 해석되지 않는 이름은 아무것도 실행하지 않고 거부된다.
+ * Gate Report를 만들지 않고, Run 디렉터리에 쓰지 않으며, Task 상태를 바꾸지 않는다.
+ */
+async function cmdSelfCheck(...argv) {
+  const USAGE_LINE = 'usage: loopctl self-check [<gate> ...]';
+  for (const a of argv) {
+    if (a.startsWith('-')) return usageError(`unknown option: ${a}\n${USAGE_LINE}`);
+  }
+  const config = loadConfig();
+  const resolved = resolveSelfCheckGates(config, argv);
+  if (!resolved.ok) {
+    console.error('self-check refused — nothing was executed:');
+    for (const e of resolved.errors) console.error(`  ${e}`);
+    process.exitCode = 2;
+    return;
+  }
+
+  console.log('Self-check (advisory — the runtime reruns gates independently after the worker finishes)');
+  console.log(`Gates: ${resolved.defs.map((d) => d.name).join(', ')}`);
+  console.log('');
+
+  const { results, passed } = await runSelfCheck({
+    config,
+    defs: resolved.defs,
+    emit: (e) => {
+      if (e.event === 'start') console.log(`[${e.name}] ${e.command}`);
+    },
+  });
+
+  for (const r of results) {
+    console.log('');
+    console.log(`${r.name}: ${r.status}  exit=${r.exit_code ?? 'none'}  ${(r.duration_ms / 1000).toFixed(1)}s`);
+    if (r.error) console.log(`  error: ${r.error}`);
+    if (r.status !== 'PASS') {
+      if (r.stderr_tail) {
+        console.log('  stderr (tail):');
+        for (const l of r.stderr_tail.split('\n')) console.log(`    ${l}`);
+      }
+      if (r.stdout_tail) {
+        console.log('  stdout (tail):');
+        for (const l of r.stdout_tail.split('\n')) console.log(`    ${l}`);
+      }
+    }
+  }
+
+  console.log('');
+  console.log(`Self-check: ${passed ? 'all gates passed' : 'FAILED'}`);
+  console.log(`Artifacts: ${rel(SELF_CHECK_DIR)}/  (advisory only — not a gate report)`);
+  if (!passed) process.exitCode = 1;
+}
+
 function cmdGates() {
   const config = loadConfig();
   const gc = loadGateConfig(config);
@@ -1589,6 +1841,9 @@ Execute
   verify <RUN|TASK>           독립 Verifier 1회 실행   --rerun --adapter --model --timeout
   retry <RUN|TASK>            진단 기반 Worker 재시도 1회  --adapter --timeout --model
   execute <TASK>              DONE 또는 정지 조건까지 Task 루프 실행  --timeout --adapter --model
+  self-check [<gate> ...]     설정된 Gate 명령만 참고용으로 실행   (AI 호출 없음 · 판정 아님)
+  execute-plan <PLAN>         승인된 Plan의 Task를 한 번에 하나씩 순차 실행  --timeout --adapter --model
+                              (오케스트레이션 판단은 결정론적 · 추가 AI 호출 없음)
 
 Inspect Runs
   diagnose <RUN|TASK>         실패 진단 · Failure Memo (읽기 전용 · AI 호출 없음)
@@ -1612,6 +1867,8 @@ Other
 
   Run ID가 정본이다. Task ID는 Runtime이 결정론적으로 해석할 때만 쓸 수 있는 편의 입력이다.
   execute는 Worker -> Gate -> Verifier -> Diagnose -> Retry를 자동으로 잇는다.
+  execute-plan은 그 execute를 Plan의 Task에 대해 한 번에 하나씩 순서대로 부른다.
+  사람이 필요한 정지에서 즉시 멈추고, 다시 실행하면 남은 Task부터 이어간다.
   계획은 승인 전까지 Task를 만들지 않고, 승인은 Task를 실행하지 않는다.
   선행 Task(depends_on)가 DONE이 아니면 그 Task는 READY가 아니며 run/execute가 거부된다.
   낮은 수준 명령은 디버깅·수동 제어용으로 그대로 남아 있다. Task 하나만 실행한다.`;
@@ -1619,9 +1876,10 @@ Other
 const commands = {
   status: cmdStatus, doctor: cmdDoctor,
   tasks: cmdTasks, show: cmdShow, ready: cmdReady, 'verify-ready': cmdVerifyReady,
-  gates: cmdGates, adapters: cmdAdapters,
+  gates: cmdGates, adapters: cmdAdapters, 'self-check': cmdSelfCheck,
   plan: cmdPlan, 'plan-show': cmdPlanShow, plans: cmdPlans, 'plan-approve': cmdPlanApprove,
   run: cmdRun, gate: cmdGate, verify: cmdVerify, retry: cmdRetry, execute: cmdExecute,
+  'execute-plan': cmdExecutePlan,
   diagnose: cmdDiagnose, execution: cmdExecution,
   usage: cmdUsage, verification: cmdVerification,
   validate: cmdValidate, transition: cmdTransition, context: cmdContext, snapshot: cmdSnapshot,

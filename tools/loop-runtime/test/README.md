@@ -18,3 +18,8 @@ node --test "tools/loop-runtime/test/*.test.mjs"
 | `planner.test.mjs` | Planner Result 계약 · Plan 검증 · 의존 그래프 · Planner 격리 · 승인 · telemetry · 유료 호출 안전성 |
 | `dependencies.test.mjs` | `depends_on` · 파생 READY · run/execute 거부 · 그래프 검증 · 하위 호환 |
 | `regression.test.mjs` | Worker · Gate · Verifier · Diagnose · execute · 읽기 전용 CLI · PAUSE · 전이 표 |
+| `policy.test.mjs` | Worker 권한 경계 — Evidence 쓰기 · 다른 Task 격리 · self-check 명령 범위 |
+| `verifier-evidence.test.mjs` | 증거 없는 PASS 거부 · 목격되지 않은 실행 주장 · 근거 존재 확인 |
+| `operability.test.mjs` | 활성 실행 표식(RUNNING/STALE) · heartbeat · 수동 복구 조정 |
+| `yaml-lite.test.mjs` | CI-010 — 큰따옴표 이스케이프 · 인용 구간 추적 · 기존 파서 동작 · YAML→Gate 경계 |
+| `plan-execution.test.mjs` | `execute-plan` — 승인 경계 · 순차 실행 · 정지 · 재개 · 결정론 |

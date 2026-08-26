@@ -461,13 +461,15 @@ phase-prompt/01-*.md
 ↓
 loopctl plan --file <phase-goal>
 ↓
-plan-show
+loopctl plan-show <PLAN-ID>
 ↓
 human review / approval
 ↓
-plan-approve
+loopctl plan-approve <PLAN-ID>
 ↓
-execute READY Tasks
+loopctl execute-plan <PLAN-ID>
+↓
+DONE  /  human-required stop
 ```
 
 Bootstrap prepares the road.

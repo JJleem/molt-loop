@@ -14,7 +14,7 @@ This step is planning only.
 
 Do not implement the product.
 Do not create Runtime Tasks.
-Do not run `loopctl plan`, `plan-approve`, or `execute`.
+Do not run `loopctl plan`, `plan-approve`, `execute-plan`, or `execute`.
 
 ---
 
@@ -449,6 +449,7 @@ Do not run:
 ```text
 loopctl plan
 loopctl plan-approve
+loopctl execute-plan
 loopctl execute
 ```
 
@@ -498,13 +499,13 @@ phase-prompt/01-....md
 ↓
 loopctl plan --file ...
 ↓
-plan-show
+loopctl plan-show <PLAN-ID>
 ↓
 human approval
 ↓
-plan-approve
+loopctl plan-approve <PLAN-ID>
 ↓
-execute READY Tasks
+loopctl execute-plan <PLAN-ID>
 ↓
 Phase DONE
 ↓

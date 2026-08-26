@@ -6,16 +6,17 @@
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, relative } from 'node:path';
-import { ROOT, LOOP_DIR } from '../task-store.mjs';
+import { ROOT } from '../task-store.mjs';
 import { computeSubject, subjectRef } from '../subject.mjs';
 import { getAdapter } from '../adapters/index.mjs';
 import { validateWorkerResult, OUTCOMES } from './result.mjs';
 import { contextMetrics, outputMetrics, normalizeTokens, observeChanges, diffObserved } from './telemetry.mjs';
+import {
+  PROTECTED_ROOT, EVIDENCE_ROOT, evidenceDirFor, evidencePathFor, protectedExceptionsFor,
+  workerDenyRules, workerAllowRules, selfCheckCommand,
+} from './policy.mjs';
 
-// Runtime이 소유하는 control plane. Worker가 바꾸면 policy violation이다.
-// evidence/ 만 예외로 둔다 — Worker가 Evidence artifact를 쓰는 자리이기 때문이다.
-export const PROTECTED_ROOT = LOOP_DIR;
-export const PROTECTED_EXCEPTIONS = [join(LOOP_DIR, 'evidence')];
+export { PROTECTED_ROOT };
 
 const rel = (p) => relative(ROOT, p).split('\\').join('/');
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
@@ -41,9 +42,12 @@ export function fingerprintDir(root, exceptions = []) {
   return map;
 }
 
-/** Worker 기준 보호 대상 지문 — .loop/evidence/ 는 Worker가 쓸 수 있으므로 제외한다. */
-export function fingerprintProtected() {
-  return fingerprintDir(PROTECTED_ROOT, PROTECTED_EXCEPTIONS);
+/**
+ * Worker 기준 보호 대상 지문 — **이 Task의 Evidence 디렉터리만** 제외한다.
+ * 다른 Task의 Evidence는 예외가 아니다. 손대면 policy violation으로 잡힌다.
+ */
+export function fingerprintProtected(taskId) {
+  return fingerprintDir(PROTECTED_ROOT, protectedExceptionsFor(taskId));
 }
 
 export function compareFingerprints(before, after) {
@@ -61,6 +65,7 @@ export function compareFingerprints(before, after) {
 
 /** Runtime이 Worker에게 덧붙이는 Result 규약. context.md에는 들어가지 않는다. */
 export function resultProtocol({ runId, taskId, resultPath }) {
+  const evidencePath = evidencePathFor(taskId);
   return [
     'RUNTIME RESULT PROTOCOL (Runtime이 지정한다. Task 내용이 아니다.)',
     '',
@@ -81,7 +86,14 @@ export function resultProtocol({ runId, taskId, resultPath }) {
     'outcome: success 이면 requested_transition은 "REVIEW"다.',
     'outcome: blocked 이면 "BLOCKED"다. outcome: failed 이면 null이다.',
     'DONE은 어떤 경우에도 요청할 수 없다. 완료 판정은 Runtime과 Verifier의 몫이다.',
-    `.loop/ 아래는 ${rel(PROTECTED_EXCEPTIONS[0])}/ 를 빼고 읽기 전용이다. 수정하면 Run이 무효가 된다.`,
+    '',
+    'RUNTIME CAPABILITIES (이 Run에서 실제로 가능한 것. 하나씩 시도해 보고 알아낼 필요 없다.)',
+    `Evidence 쓰기: ${evidencePath}/ 아래에만 쓸 수 있다. 이 디렉터리는 Runtime이 미리 만들어 두었다.`,
+    `.loop/ 의 나머지는 전부 읽기 전용이다 — 다른 Task의 ${rel(EVIDENCE_ROOT)}/<TASK-ID>/ 포함. 수정하면 Run이 무효가 된다.`,
+    `명령 실행: 아래 self-check 하나만 실행할 수 있다. 다른 Bash 명령은 전부 거부된다.`,
+    `  ${selfCheckCommand()} [<gate> ...]`,
+    '  이것은 project.yaml에 설정된 Gate 명령만 돌리는 Runtime 소유 진입점이다.',
+    '  결과는 참고용이다 — 완료 판정이 아니다. Runtime이 Worker 종료 후 Gate를 독립적으로 다시 돌린다.',
   ].join('\n');
 }
 
@@ -104,10 +116,10 @@ export async function runWorkerOnce({ task, snapshot, config, attempt = 1 }) {
   const timeoutMs = config.runtime.worker_timeout_seconds * 1000;
 
   // Evidence 디렉터리는 Worker가 쓸 수 있어야 하므로 Runtime이 미리 만들어 둔다.
-  // (.loop/evidence는 보호 대상에서 제외되어 있다.)
-  mkdirSync(join(PROTECTED_EXCEPTIONS[0], task.id), { recursive: true });
+  // deny 규칙도 fingerprint 예외도 정확히 이 경로 하나만 연다 (worker/policy.mjs).
+  mkdirSync(evidenceDirFor(task.id), { recursive: true });
 
-  const protectedBefore = fingerprintProtected();
+  const protectedBefore = fingerprintProtected(task.id);
   const changesBefore = observeChanges(ROOT, { ignore: ['.loop-local/'] });
   // 이 Run이 어떤 저장소 상태에서 시작해 어떤 상태를 남겼는지. 나중에 retry 안전성 판단에 쓴다.
   const subjectBefore = subjectRef(computeSubject(ROOT));
@@ -122,11 +134,12 @@ export async function runWorkerOnce({ task, snapshot, config, attempt = 1 }) {
     timeoutMs,
     model: config.runtime.worker_model,
     resultPath,
-    deny: [`Edit(${rel(PROTECTED_ROOT)}/**)`, `Write(${rel(PROTECTED_ROOT)}/**)`],
+    deny: workerDenyRules(task.id),
+    allow: workerAllowRules(),
   });
   const finishedAt = new Date();
 
-  const protectedAfter = fingerprintProtected();
+  const protectedAfter = fingerprintProtected(task.id);
   const subjectAfter = subjectRef(computeSubject(ROOT));
   const integrity = compareFingerprints(protectedBefore, protectedAfter);
   const observed = diffObserved(changesBefore, observeChanges(ROOT, { ignore: ['.loop-local/'] }));
@@ -195,7 +208,7 @@ export async function runWorkerOnce({ task, snapshot, config, attempt = 1 }) {
     policy_violation: integrity.violated,
     protected_paths: {
       root: rel(PROTECTED_ROOT),
-      exceptions: PROTECTED_EXCEPTIONS.map(rel),
+      exceptions: protectedExceptionsFor(task.id).map(rel),
       file_count: Object.keys(protectedBefore).length,
       ...integrity,
     },

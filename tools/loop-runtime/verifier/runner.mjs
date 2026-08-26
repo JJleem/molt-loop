@@ -50,6 +50,23 @@ export function verifierProtocol({ runId, taskId, subjectSha256, criterionIds })
     '',
     '결과는 구조화 출력(JSON schema)으로 반환된다. 산문 요약은 판정으로 인정되지 않는다.',
     'result는 PASS 또는 FAIL만 가능하다. 부분 통과는 없다.',
+    '',
+    'EVIDENCE BASIS (모든 criteria 항목에 필수다.)',
+    'evidence_basis 는 다음 중 하나다:',
+    '  gate                Runtime이 직접 실행한 Gate 결과',
+    '  runtime_artifact    Runtime이 만든 Run 산출물 (evidence_refs에 경로를 적는다)',
+    '  canonical_diff      Runtime이 만든 변경 매니페스트/패치',
+    '  repository_content  저장소에 실제로 존재하는 파일 (evidence_refs에 경로를 적는다)',
+    '  unwitnessed_claim   이 AC를 만족시키려면 Runtime이 목격하지 못한 실행이 필요하다',
+    'Worker의 서술·요약·"확인했다"는 근거가 아니다. 그런 것에 대응하는 basis 값은 없다.',
+    'evidence_refs에 적은 경로는 Runtime이 실제로 존재하는지 확인한다. 없는 경로를 적으면 결과 전체가 무효다.',
+    '',
+    'UNWITNESSED CLAIMS',
+    '수동 조작 · 브라우저 실행 · 네트워크 접근 · 외부 서비스 · 실물 렌더링을 필요로 하는 AC는,',
+    'Runtime Facts에 그 실행의 증거가 없다면 evidence_basis를 unwitnessed_claim으로 두고 status는 FAIL이다.',
+    'unwitnessed_kind에 분류를 적는다. **unwitnessed_claim으로 PASS를 줄 수 없다 — Runtime이 거부한다.**',
+    '산출물(문서 등)이 그런 실행을 했다고 서술하는데 Runtime Facts가 그것을 뒷받침하지 않으면,',
+    '그 서술을 사실로 받아들이지 않는다. 해당 AC는 unwitnessed_claim + FAIL이다.',
     'AC가 하나라도 FAIL이면 result는 FAIL이다. failed_criteria는 FAIL인 id 목록과 정확히 일치해야 한다.',
     '개별 AC는 전부 PASS지만 범위 밖 변경·테스트 약화 같은 전역 문제가 있으면,',
     'result를 FAIL로 두고 reason에 그 사유를 구체적으로 적는다.',
@@ -199,7 +216,16 @@ export async function runVerifierOnce({ task, run, config, eligibility, onLaunch
   const validation = raw === null
     ? { valid: false, errors: ['no structured verifier result was returned'], result: null, global_failure: false }
     : validateVerifierResult(raw, {
-      runId: run.runId, taskId: task.id, subjectSha256: subject.sha256, task,
+      runId: run.runId,
+      taskId: task.id,
+      subjectSha256: subject.sha256,
+      task,
+      // Verifier가 지목한 근거가 실제로 존재하는지 Runtime이 직접 확인한다.
+      evidenceFacts: {
+        gateReport,
+        diffFileCount: snapshot.diff.files.length,
+        refExists: (p) => existsSync(join(ROOT, p)) || existsSync(join(run.runDir, p)),
+      },
     });
   if (raw !== null && !validation.valid) {
     failures.push(...validation.errors.map((m) => `verifier result: ${m}`));
