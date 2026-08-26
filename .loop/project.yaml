@@ -3,11 +3,13 @@
 # 존재하지 않는 명령을 추정해서 채우지 않는다.
 
 project:
-  name: 3d-asset-compatibility-lab
-  # 계획된 스택 (아직 미생성): React + TypeScript + Vite
-  # 현재 repository 상태: 애플리케이션 소스 없음, package.json 없음
-  language: typescript
-  package_manager: npm      # 로컬 확인: node v24.19.0 / npm 11.17.0
+  # Bootstrap에서 실제 프로젝트 이름으로 바꾼다. 아래 값들도 마찬가지다 —
+  # 실제로 확인한 것만 적고, 존재하지 않는 것을 추정해서 채우지 않는다.
+  name: unnamed-project
+  # 현재 repository 상태: 애플리케이션 소스 없음, package.json 없음.
+  # 스택은 Bootstrap이 docs/PRODUCT-SPEC.md를 보고 정한다.
+  language: null
+  package_manager: null
   vcs: git
 
 runtime:
