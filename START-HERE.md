@@ -83,7 +83,7 @@ Do not begin Phase implementation before planning and Bootstrap are complete.
 
 Use:
 
-`docs/PROJECT-PHASE-PLANNER.md`
+`prompts/PROJECT-PHASE-PLANNER.md`
 
 as the planning instruction.
 
@@ -135,7 +135,7 @@ Do not start implementation just because the roadmap files now exist.
 
 After the Product Spec and Phase roadmap exist, use:
 
-`docs/PROJECT-BOOTSTRAP.md`
+`prompts/PROJECT-BOOTSTRAP.md`
 
 as the Bootstrap instruction.
 
