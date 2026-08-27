@@ -30,6 +30,42 @@ If the Product Spec and a Phase Goal appear inconsistent in a way that affects i
 
 ---
 
+# System Map
+
+If `docs/SYSTEM-MAP.md` exists, treat it as the persistent high-level map of the project:
+what the system is, what is actually implemented, how work flows through it, where the
+external dependency boundary sits, and which detailed document to read next.
+
+Before planning or executing a new Phase, read:
+
+- `docs/SYSTEM-MAP.md`, if it exists
+- the relevant architecture, Phase, sign-off, and field-note documents
+
+Update `docs/SYSTEM-MAP.md` only when:
+
+- a Phase reaches final DONE, or
+- a meaningful architecture boundary changes.
+
+Do not update it for every Task.
+
+Never describe PLANNED, DEFERRED, or CANDIDATE functionality as implemented.
+
+An installed dependency is not an implemented feature. A package in the manifest, a
+successful preflight, or a sample that ran once is not `DONE`. Only integration into the
+product path, with its validation passing, is `DONE`.
+
+Do not let the System Map absorb detailed documentation. It is an index that links to the
+detailed documents, not a replacement for them.
+
+When updating it, do not overwrite history: a later Phase does not erase what earlier
+Phases established, and Current / Planned / Deferred must stay distinguishable.
+
+If `docs/SYSTEM-MAP.md` does not exist, do not invent one from assumption. It is created
+from repository evidence during Bootstrap, or at the first Phase boundary that produces
+real architecture. See `prompts/PROJECT-BOOTSTRAP.md`.
+
+---
+
 # Loop Runtime
 
 Use the Loop Runtime for planned implementation work.
@@ -107,8 +143,8 @@ Do not manually replace the Runtime Planner by turning Phase prompts into hardco
 
 For each Phase:
 
-1. Read the corresponding Goal file under `phase-prompt/`.
-2. Use that file as the Goal for `loopctl plan`.
+1. Read the corresponding Goal file under `phase-prompt/`, and `docs/SYSTEM-MAP.md` if it exists.
+2. Use the Goal file as the Goal for `loopctl plan`.
 3. Run `plan-show`.
 4. Stop before approval and let the user review the Plan.
 5. After explicit approval, run `plan-approve`.
@@ -129,7 +165,10 @@ For each Phase:
    - provider-reported cost metric
    - recovery events
 10. Continue until all Tasks for the current Phase are DONE.
-11. Do not begin the next Phase early.
+11. When the Phase reaches final DONE, update `docs/SYSTEM-MAP.md` if it exists and any of
+    these actually changed: system flow, major components, external dependency boundary,
+    validation model, known boundaries, decision history, or Phase status.
+12. Do not begin the next Phase early.
 
 Do not automatically approve a Plan unless the user explicitly asks.
 

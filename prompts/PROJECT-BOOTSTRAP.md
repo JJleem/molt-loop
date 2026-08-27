@@ -41,10 +41,11 @@ Do not invent the product direction during Bootstrap.
 Read:
 
 1. `docs/PRODUCT-SPEC.md`
-2. `.loop/KERNEL.md`
-3. `.loop/project.yaml`
-4. relevant Runtime policies under `.loop/policies/`
-5. existing repository files and package / build configuration
+2. `docs/SYSTEM-MAP.md`, if it already exists
+3. `.loop/KERNEL.md`
+4. `.loop/project.yaml`
+5. relevant Runtime policies under `.loop/policies/`
+6. existing repository files and package / build configuration
 
 Use the Product Spec only to understand the intended product and likely development stack.
 
@@ -313,7 +314,9 @@ It must preserve these rules:
 - Runtime state / Gates / Verifier / recovery are not bypassed,
 - Runtime-launched Planner / Worker / Verifier contexts remain isolated,
 - project files are not modified while Execute / Gate / Verifier is active or while verification subject integrity must remain stable,
-- Field Notes are written only after the Runtime operation reaches a stable point.
+- Field Notes are written only after the Runtime operation reaches a stable point,
+- `docs/SYSTEM-MAP.md`, when it exists, is read before planning a Phase and updated only at
+  Phase boundaries or meaningful architecture changes.
 
 Do not inject `CLAUDE.local.md` into Runtime Worker / Planner / Verifier snapshots unless the Runtime explicitly supports that design.
 
@@ -339,7 +342,66 @@ Record evidence first.
 
 ---
 
-# 15. Run Runtime Self-Checks
+# 15. System Map
+
+`docs/SYSTEM-MAP.md` is the project's persistent high-level map: what the system is,
+what is actually implemented, how work flows through it, where the external dependency
+boundary sits, and which detailed document to read next.
+
+Use the shared template:
+
+```text
+docs/SYSTEM-MAP.template.md
+```
+
+Copy it to `docs/SYSTEM-MAP.md` and fill it in. Leave the template file itself unchanged.
+
+## If the repository already has architecture
+
+Build the map **from evidence, not from assumption**:
+
+```text
+inspect the repository
+→ inspect existing architecture / docs
+→ write SYSTEM-MAP from what actually exists
+```
+
+Read the source layout, the existing documents, and the dependency manifest before writing
+a single section. Do not describe a component you have not opened.
+
+## If the repository is new or nearly empty
+
+Do not fill the map as though a system already exists.
+
+Choose one:
+
+- create `docs/SYSTEM-MAP.md` as a **skeleton only** — sections present, status table present,
+  Update Rule present, and the parts that have no evidence yet left explicitly empty; or
+- do not create it during Bootstrap at all, and create it at the **first Phase boundary that
+  produces real architecture**.
+
+Either is acceptable. Inventing architecture to fill the document is not.
+
+## Status discipline
+
+The status vocabulary in the template is not decoration:
+
+```text
+DONE       implementation exists in the repository and passed its required validation
+PLANNED    planned, not implemented
+DEFERRED   intentionally postponed to a later scope
+CANDIDATE  under consideration, neither selected nor implemented
+```
+
+**An installed dependency is not an implemented feature.** A package present in the manifest,
+a successful preflight, or a sample that ran once is not `DONE`. Only integration into the
+product path, with its validation passing, is `DONE`.
+
+Bootstrap installs dependencies. That alone changes nothing to `DONE`.
+
+---
+
+# 16. Run Runtime Self-Checks
 
 After project Gate configuration is complete, run the Runtime's available deterministic health / regression checks.
 
@@ -363,7 +425,7 @@ Bootstrap is not complete if project configuration silently breaks Runtime behav
 
 ---
 
-# 16. Bootstrap Completion Criteria
+# 17. Bootstrap Completion Criteria
 
 Bootstrap is complete only when all applicable statements are true:
 
@@ -376,13 +438,16 @@ Bootstrap is complete only when all applicable statements are true:
 - `.loop/project.yaml` references only proven commands,
 - Runtime health check passes,
 - `.loop-local/` contains no stale project history,
+- `docs/SYSTEM-MAP.md` either reflects what the repository actually contains, or was
+  deliberately deferred to the first Phase boundary that produces real architecture —
+  it must never describe unimplemented work as `DONE`,
 - no real Phase 1 feature has been implemented,
 - no future product dependency was installed without current need,
 - Product Spec and Phase Goals remain unchanged unless Bootstrap uncovered a clear factual setup correction requiring human review.
 
 ---
 
-# 17. Explicit Non-Goals
+# 18. Explicit Non-Goals
 
 Bootstrap must NOT:
 
@@ -402,7 +467,7 @@ Bootstrap stops when the repository is ready for Phase planning.
 
 ---
 
-# 18. Final Verification Sequence
+# 19. Final Verification Sequence
 
 Before declaring Bootstrap complete, perform a final clean verification using the actual repository commands.
 
@@ -428,7 +493,7 @@ Do not claim PASS for commands that were not executed.
 
 ---
 
-# 19. Final Report
+# 20. Final Report
 
 When Bootstrap finishes, report:
 
@@ -443,6 +508,7 @@ When Bootstrap finishes, report:
 - test result,
 - Runtime self-check result,
 - `loopctl doctor` result,
+- whether `docs/SYSTEM-MAP.md` was created, created as a skeleton, or deferred — and why,
 - confirmation that no Phase product feature was implemented,
 - any unresolved setup risks.
 
@@ -452,7 +518,7 @@ Do not begin Phase 1 automatically.
 
 ---
 
-# 20. Intended Next Step
+# 21. Intended Next Step
 
 After Bootstrap is complete, the operator should begin with the first Phase Goal:
 

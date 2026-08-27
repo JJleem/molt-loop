@@ -29,6 +29,11 @@ If `docs/PRODUCT-SPEC.md` already exists, treat it as the product source of trut
 
 If no Product Spec exists yet, create one first from the user's topic.
 
+If `docs/SYSTEM-MAP.md` already exists, read it before planning Phases — it states what is
+already implemented, and Phase Goals must not re-plan work that is already `DONE`. Do not
+write to it here: this step produces planning documents only, and the System Map is created
+during Bootstrap or at a Phase boundary.
+
 Do not silently broaden or replace an existing Product Spec.
 
 ---

@@ -25,6 +25,8 @@ Before doing anything else, inspect and understand the following files if they e
 - `CLAUDE.local.md`
 - `prompts/PROJECT-PHASE-PLANNER.md`
 - `prompts/PROJECT-BOOTSTRAP.md`
+- `docs/SYSTEM-MAP.md` — the project's high-level map, if this repository already has one
+- `docs/SYSTEM-MAP.template.md` — the template it is created from
 - `docs/LOOP-RUNTIME-FIELD-NOTES.md`
 - `.loop/KERNEL.md`
 - `.loop/project.yaml`
@@ -153,8 +155,13 @@ Depending on the project, this may include:
 - `.loop/project.yaml`
 - deterministic Gate commands
 - Runtime doctor checks
+- `docs/SYSTEM-MAP.md`, from repository evidence
 
 Do not implement normal product features during Bootstrap.
+
+If the repository is new or nearly empty, do not fill `docs/SYSTEM-MAP.md` as though a
+system already exists. Create a skeleton, or defer it to the first Phase boundary that
+produces real architecture. `prompts/PROJECT-BOOTSTRAP.md` §15 covers both cases.
 
 Do not install speculative future dependencies.
 
