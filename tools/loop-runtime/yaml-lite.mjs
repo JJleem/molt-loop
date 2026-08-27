@@ -83,20 +83,51 @@ function readBlockScalar(raw, keyLineNo, keyIndent, style, chomp) {
   return { text, consumedThrough: keyLineNo + body.length };
 }
 
+/**
+ * block scalar header 한 줄. `key: |` `key: >-` 와 sequence item 형태 `- key: |-`.
+ * parseMap/parseSeq이 실제로 인정하는 모양(KEY_RE + `^([|>])([+-]?)$`)과 같아야 한다.
+ */
+const BLOCK_SCALAR_HEADER_RE = /^(?:-\s+)?[A-Za-z_][A-Za-z0-9_.-]*\s*:\s+[|>][+-]?$/;
+
 function scanLines(text) {
   const out = [];
-  text.split(/\r?\n/).forEach((raw, idx) => {
+  const raw = text.split(/\r?\n/);
+  // block scalar 본문은 readBlockScalar가 raw 줄에서 직접 읽는다. 그래서 여기서 만든
+  // content는 본문에 대해서는 애초에 쓰이지 않는다 — 그런데도 스캔하면 본문의 따옴표·#·
+  // 콜론이 문법으로 오인된다. 실제로 `Confirm no 'node:' import exists.` 라는 평범한
+  // 산문이 phantom quote를 열어 'unterminated quote'로 Plan 승인을 막았다(OBS-013).
+  // 본문의 범위는 readBlockScalar와 같은 규칙으로 정한다: header보다 깊게 들여쓴 줄은
+  // 전부 본문이고, header 이하로 돌아오는 첫 비어 있지 않은 줄에서 끝난다.
+  let bodyIndent = null;
+  for (let idx = 0; idx < raw.length; idx += 1) {
+    const line = raw[idx];
     const lineNo = idx + 1;
-    if (/^\s*$/.test(raw)) return;
-    if (/^\s*#/.test(raw)) return;
-    if (/^\t|^ *\t/.test(raw)) throw new YamlError('tab indentation is not allowed', lineNo);
-    const content = stripComment(raw).trimEnd();
-    if (content.trim() === '') return;
-    if (content.trim() === '---' || content.trim() === '...') {
+    if (/^\s*$/.test(line)) continue;
+    if (bodyIndent !== null) {
+      if (line.length - line.trimStart().length > bodyIndent) {
+        // 본문은 해석하지 않는다. tab 들여쓰기 금지만 그대로 적용한다 —
+        // tab이 섞이면 readBlockScalar의 들여쓰기 계산이 깨지기 때문이다.
+        if (/^\t|^ *\t/.test(line)) throw new YamlError('tab indentation is not allowed', lineNo);
+        continue;
+      }
+      bodyIndent = null;
+    }
+    if (/^\s*#/.test(line)) continue;
+    if (/^\t|^ *\t/.test(line)) throw new YamlError('tab indentation is not allowed', lineNo);
+    const content = stripComment(line).trimEnd();
+    if (content.trim() === '') continue;
+    const trimmed = content.trim();
+    if (trimmed === '---' || trimmed === '...') {
       throw new YamlError('multi-document YAML is not supported', lineNo);
     }
-    out.push({ indent: content.length - content.trimStart().length, content: content.trim(), lineNo });
-  });
+    const indent = content.length - content.trimStart().length;
+    out.push({ indent, content: trimmed, lineNo });
+    if (BLOCK_SCALAR_HEADER_RE.test(trimmed)) {
+      // `- key: |-` 는 parseSeq가 dash를 지운 가상 라인(indent + 2)으로 파싱하므로
+      // readBlockScalar가 보는 keyIndent도 indent + 2다. 여기서도 같은 값을 쓴다.
+      bodyIndent = trimmed.startsWith('- ') ? indent + 2 : indent;
+    }
+  }
   return out;
 }
 

@@ -997,6 +997,48 @@ Gate를 실행하는 **모든** Runtime 테스트가 이 경로를 지난다. �
 ---
 
 
+# OBS-013 Sync — `yaml-lite` block scalar 본문 재해석
+
+**Date:** 2026-08-27  ·  **출처:** canonical field-test 프로젝트에서 관찰·수정·검증됨
+
+이 항목은 Starter Pack이 **관찰한 것이 아니라 동기화한 것**이다. 관찰과 수정의 전체 기록은
+canonical 프로젝트의 Field Notes에 있으며, 여기에는 동기화 사실만 남긴다.
+
+**증상.** Plan validation은 PASS이고 repository subject도 일치하는데 `plan-approve`가
+fail-closed로 거부됐다.
+
+```text
+TASK-...: serialized task does not parse back - unterminated quote
+```
+
+**원인.** 승인 로직이 아니라 파서였다. `scanLines()`가 block scalar **본문**까지
+`stripComment()`에 넘겨서, `'node:'` 처럼 콜론 뒤에 따옴표가 오는 평범한 기술 산문이
+값을 여는 인용으로 오인되어 닫히지 않는 구간을 만들었다. 본문은 `readBlockScalar()`가
+raw 줄에서 따로 읽으므로 `scanLines`가 만든 content는 **애초에 쓰이지도 않았다** —
+해석할 이유가 없는 줄을 해석하다 실패한 것이다.
+
+**동기화한 것.** canonical의 최소 수정을 그대로 가져왔다(byte-identical).
+
+```text
+tools/loop-runtime/yaml-lite.mjs            scanLines() 한 함수
+tools/loop-runtime/test/yaml-lite.test.mjs  회귀 10건 추가
+```
+
+block scalar **바깥**의 인용 검사·주석 처리·미지원 문법 거부는 하나도 느슨해지지 않았고,
+CI-010의 `\"` 이스케이프 동작도 그대로다. 회귀가 그 성질을 고정한다.
+
+| | CI-010 이후 | OBS-013 동기화 이후 |
+|---|---|---|
+| Runtime 회귀 | 139 pass / 0 fail | **149 pass / 0 fail** |
+| `loopctl doctor` | exit 0 | exit 0 |
+| `loopctl validate` | exit 0 | exit 0 |
+
+CI 번호는 부여하지 않았다 — canonical 쪽에서도 아직 부여되지 않았고, 이번 작업은
+새 개선 후보를 만드는 것이 아니라 검증된 수정을 옮긴 것이다.
+
+---
+
+
 # Candidate Improvements
 
 실제 사용 사례가 충분히 쌓인 항목만 이 표로 승격한다.

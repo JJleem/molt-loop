@@ -217,3 +217,211 @@ test('a gate command that is genuinely broken still fails closed', () => {
     assert.doesNotMatch(r.stdout, /build: PASS/);
   });
 });
+
+// ==================================================================
+// OBS-013 — block scalar 본문이 인용/주석 스캐너에 다시 해석되던 문제.
+//
+// 관찰된 버그(Phase 3 Plan 승인 중 발견):
+//   Plan validation PASS · repository subject 일치 · 그런데도 plan-approve가 fail-closed.
+//     TASK-021: serialized task does not parse back - unterminated quote
+//
+//   원인은 승인이 아니라 파서였다. scanLines()가 block scalar **본문**까지
+//   stripComment()에 넘겼고, `'node:'` 처럼 콜론 뒤에 따옴표가 오는 평범한
+//   기술 산문이 값을 여는 인용으로 오인되어 닫히지 않는 구간을 만들었다.
+//
+//   본문은 readBlockScalar()가 raw 줄에서 따로 읽으므로 scanLines가 만든 content는
+//   애초에 쓰이지도 않았다. 해석할 이유가 없는 줄을 해석하다 실패한 것이다.
+//
+// 고친 것은 파싱이지 판정이 아니다. block scalar 바깥의 인용 검사는 그대로다.
+// ==================================================================
+
+// ------------------------------------------------------------------
+// Case A — 승인을 막은 실제 문자열
+// ------------------------------------------------------------------
+
+test('OBS-013: a block scalar body may contain a quote right after a colon', () => {
+  const doc = parseYaml(yaml(
+    'request: |-',
+    "  Confirm no 'node:' import exists."
+  ));
+  assert.equal(doc.request, "Confirm no 'node:' import exists.");
+});
+
+test('OBS-013: the exact acceptance-criterion text that refused approval round-trips', () => {
+  // TASK-021 AC6의 instruction 원문. 이 한 줄이 Phase 3 Plan 승인을 막았다.
+  const instruction =
+    "Confirm no import of the package's cli entry and no 'node:' import exists in the "
+    + 'adapter or anywhere it pulls in from src/. If WebPCodec.wasmUrl or WorkerQueue.workerUrl '
+    + 'is set, confirm it happens only inside the adapter directory.';
+  const doc = parseYaml(yaml('instruction: |-', `  ${instruction}`));
+  assert.equal(doc.instruction, instruction);
+});
+
+// ------------------------------------------------------------------
+// Case B — 콜론을 담은 기술 산문 일반
+// ------------------------------------------------------------------
+
+test('OBS-013: colon-bearing technical prose survives in a block scalar body', () => {
+  const doc = parseYaml(yaml(
+    'request: |-',
+    '  Check \'foo:bar\' and "http://example.test".'
+  ));
+  assert.equal(doc.request, 'Check \'foo:bar\' and "http://example.test".');
+});
+
+test('OBS-013: an odd number of quotes in a block scalar body is content, not syntax', () => {
+  // 홀수 개의 따옴표는 인용 구간 추적으로 보면 미종료다. 본문에서는 그냥 글자다.
+  for (const body of ["  no 'node:' left open", '  a: "b', "  it's a 'quote: here", '  ends with \'']) {
+    const doc = parseYaml(`request: |-\n${body}\n`);
+    assert.equal(doc.request, body.slice(2), body);
+  }
+});
+
+// ------------------------------------------------------------------
+// Case C — 여러 줄 본문이 손상되지 않는다
+// ------------------------------------------------------------------
+
+test('OBS-013: a multiline block scalar keeps every line intact', () => {
+  const doc = parseYaml(yaml(
+    'request: |-',
+    "  Line one mentions 'node:' and a # hash.",
+    '  Line two has "http://example.test" and key: value.',
+    '',
+    '  Line four follows a blank line.',
+    'status: TODO'
+  ));
+  assert.equal(
+    doc.request,
+    "Line one mentions 'node:' and a # hash.\n"
+    + 'Line two has "http://example.test" and key: value.\n'
+    + '\n'
+    + 'Line four follows a blank line.'
+  );
+  assert.equal(doc.status, 'TODO');
+});
+
+test('OBS-013: block scalar bodies nested in a sequence item are not rescanned either', () => {
+  const doc = parseYaml(yaml(
+    'acceptance_criteria:',
+    '  - id: AC1',
+    '    description: |-',
+    "      Confirm no 'node:' import exists.",
+    '    verification:',
+    '      type: verifier',
+    '      instruction: |-',
+    '        # this line is body, not a comment',
+    "        Reject 'foo:bar' outputs.",
+    '  - id: AC2',
+    '    description: |-',
+    '      Plain one.',
+    '    verification:',
+    '      type: gate',
+    '      ref: build'
+  ));
+  assert.equal(doc.acceptance_criteria.length, 2);
+  assert.equal(doc.acceptance_criteria[0].description, "Confirm no 'node:' import exists.");
+  assert.equal(
+    doc.acceptance_criteria[0].verification.instruction,
+    "# this line is body, not a comment\nReject 'foo:bar' outputs."
+  );
+  assert.equal(doc.acceptance_criteria[1].verification.ref, 'build');
+});
+
+// ------------------------------------------------------------------
+// Case D — 본문 밖의 검사는 하나도 느슨해지지 않는다
+// ------------------------------------------------------------------
+
+test('OBS-013: a genuine unterminated quote outside a block scalar still fails', () => {
+  assert.throws(() => parseYaml(yaml('key: "unterminated')), YamlError);
+  assert.throws(() => parseYaml(yaml("key: 'unterminated")), YamlError);
+  // block scalar가 문서에 있어도, 그 바깥 줄의 미종료 인용은 그대로 거부된다.
+  assert.throws(() => parseYaml(yaml(
+    'request: |-',
+    "  Confirm no 'node:' import exists.",
+    'reason: "still unterminated'
+  )), YamlError);
+  // block scalar가 끝난 뒤 같은 들여쓰기로 돌아온 줄도 정상 검사 대상이다.
+  assert.throws(() => parseYaml(yaml(
+    'outer:',
+    '  request: |-',
+    "    Confirm no 'node:' import exists.",
+    '  reason: "still unterminated'
+  )), YamlError);
+});
+
+test('OBS-013: comments, escapes and unsupported syntax outside block scalars are unchanged', () => {
+  const doc = parseYaml(yaml(
+    'request: |-',
+    "  Body mentions 'node:'.",
+    'command: "node -e \\"process.exit(0)\\"" # a real comment',
+    'flag: true # another comment'
+  ));
+  assert.equal(doc.command, 'node -e "process.exit(0)"');
+  assert.equal(doc.flag, true);
+  // 미지원 문법은 block scalar가 있는 문서에서도 여전히 거부된다.
+  assert.throws(() => parseYaml(yaml('request: |-', '  body', 'key: {a: 1}')), /flow mappings/);
+  assert.throws(() => parseYaml(yaml('request: |-', '  body', 'key: &a v')), /anchors\/aliases/);
+  assert.throws(() => parseYaml(yaml('request: |-', '  body', 'key: "a\\nb"')), /unsupported escape/);
+  assert.throws(() => parseYaml('request: |-\n  body\nkey:\n\tnested: 1\n'), /tab indentation/);
+});
+
+test('OBS-013: a header-shaped line inside a block scalar body does not open a nested body', () => {
+  // 본문 안의 `note: |-` 는 글자다. 중첩 본문을 열지 않으며,
+  // header 들여쓰기로 돌아온 줄에서 본문이 끝나고 일반 파싱이 재개돼야 한다.
+  const doc = parseYaml(yaml(
+    'request: |-',
+    '  note: |-',
+    '  still body',
+    'status: TODO'
+  ));
+  assert.equal(doc.request, 'note: |-\nstill body');
+  assert.equal(doc.status, 'TODO');
+
+  // 그리고 그 재개된 줄은 여전히 정상 검사 대상이다.
+  assert.throws(() => parseYaml(yaml(
+    'request: |-',
+    '  note: |-',
+    '  still body',
+    'reason: "unterminated'
+  )), YamlError);
+});
+
+// ------------------------------------------------------------------
+// Case E — 승인 실패가 난 자리: serialize -> parse round-trip
+// ------------------------------------------------------------------
+
+test('OBS-013: a task carrying the observed text serializes and parses back', async () => {
+  const { materializedTaskData } = await import('../planner/validator.mjs');
+  const { renderTaskYaml } = await import('../planner/task-yaml.mjs');
+
+  const proposal = {
+    request: "Implement the adapter. Never import a node: builtin, and reject 'foo:bar' inputs.",
+    execution: { role: 'impl' },
+    stop_condition: { gates: ['build', 'lint', 'test'], requires_verifier: true, max_consecutive_failures: 3 },
+    acceptance_criteria: [
+      {
+        id: 'AC1',
+        description: "npm test passes with the adapter's tests.",
+        verification: { type: 'gate', ref: 'test' },
+      },
+      {
+        id: 'AC2',
+        description: 'The adapter reaches no node builtin.',
+        verification: {
+          type: 'verifier',
+          instruction:
+            "Confirm no import of the package's cli entry and no 'node:' import exists in the "
+            + 'adapter, and that "http://example.test" is never contacted.',
+        },
+      },
+    ],
+  };
+
+  const data = materializedTaskData(proposal, { id: 'TASK-999', dependsOn: ['TASK-998'] });
+  const rendered = renderTaskYaml(data, { header: ['# generated by a test'] });
+
+  assert.equal(rendered.ok, true, `serialization must round-trip: ${rendered.errors?.join(' | ')}`);
+  // 직렬화된 원문이 실제로 관찰된 문자열을 담고 있어야 한다 — 회피가 아니라 수정임을 고정한다.
+  assert.match(rendered.text, /'node:'/);
+  assert.deepEqual(parseYaml(rendered.text), data);
+});
