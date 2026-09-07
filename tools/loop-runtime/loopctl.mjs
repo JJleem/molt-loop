@@ -48,6 +48,10 @@ import {
   resolveExecutablePlan, executePlan, writePlanExecutionReport, listPlanExecutions,
 } from './loop/plan-executor.mjs';
 import { PLAN_REPORT_SCHEMA } from './planner/report.mjs';
+import { usageLedger } from './usage-ledger.mjs';
+import { assessResume } from './recovery/resume.mjs';
+import { acquireOperationLock } from './operation-lock.mjs';
+import { runWorkflow } from './loop/workflow.mjs';
 
 const rel = (p) => relative(ROOT, p).split('\\').join('/');
 
@@ -376,6 +380,25 @@ async function finishWorkerRun({ task, snapshot, config, attempt }) {
 
 /** usage — 이미 기록된 Runtime Envelope의 telemetry를 보여준다. 새 계산도 AI 호출도 하지 않는다. */
 function cmdUsage(ref) {
+  if (!ref || ref === '--all' || ref.startsWith('PLAN-')) {
+    let taskIds = null;
+    if (ref?.startsWith('PLAN-')) {
+      const p = resolveExecutablePlan(ref);
+      if (!p.ok) return fail(p.reason);
+      taskIds = p.taskIds;
+    }
+    const u = usageLedger({ taskIds, planId: taskIds ? ref : null });
+    console.log('Recorded usage (includes archived attempts; no AI calls)');
+    for (const stage of ['planner', 'worker', 'gate', 'verifier']) console.log(`  ${stage}: ${(u.stage_ms[stage] / 1000).toFixed(1)}s`);
+    console.log(`Known cost: $${u.known_cost_usd.toFixed(4)}; unknown cost: ${u.unknown_cost_invocations} invocation(s)`);
+    console.log(`Tokens by category: ${JSON.stringify(u.tokens)}`);
+    console.log(`Human-required stops: ${u.human_stops.length}; retry worker cost (known): $${u.retry_worker_cost_usd_known.toFixed(4)}`);
+    for (const id of [...new Set(u.invocations.map((i) => i.task_id).filter(Boolean))]) {
+      const calls = u.invocations.filter((i) => i.task_id === id);
+      console.log(`  ${id}: ${calls.length} calls, ${(calls.reduce((n, i) => n + (i.duration_ms ?? 0), 0) / 1000).toFixed(1)}s, $${calls.reduce((n, i) => n + (i.provider_cost_usd ?? 0), 0).toFixed(4)} known; retries=${calls.filter((i) => i.stage === 'worker' && i.attempt > 1).length}`);
+    }
+    return;
+  }
   if (!ref) return usageError('usage: loopctl usage <RUN|TASK>');
   // Run ID가 정본이다. Task ID는 Runtime의 결정론적 해석을 거치는 편의 입력일 뿐이다.
   const resolved = resolveRunRef(ref);
@@ -706,7 +729,7 @@ function cmdVerification(ref) {
 
   console.log(`${report.run_id}  task=${report.task_id}  attempt=${report.attempt}`);
   console.log(`subject: ${report.verification_subject_sha256}  stable=${report.verification_subject_stable}`);
-  console.log(`gate: ${report.gate_result}   verifier: ${report.verifier_result ?? 'INVALID'}   result: ${report.result}`);
+  console.log(`gate: ${report.gate_result}   verifier: ${report.completion_method === 'gate-only' ? 'not invoked (gate-only)' : report.verifier_result ?? 'INVALID'}   result: ${report.result}`);
   console.log('');
   console.log('acceptance criteria:');
   for (const a of report.acceptance_criteria) {
@@ -950,6 +973,12 @@ function cmdDiagnose(ref) {
 
   const config = loadConfig();
   const { diagnosis: d, memo, memoReason, budget } = assess({ task, run, config });
+  const gate = readGateReport(run.runDir);
+  if (gate && !gate.corrupt && deriveVerifyReady({ task, config }).stale) {
+    const recovery = assessResume(gate, config);
+    console.log(`Subject changes: ${recovery.detail}`);
+    console.log(`Recovery: loopctl resume ${task.id} --rerun-gates`);
+  }
 
   if (selectedBy === 'latest-run-for-task') {
     console.log(`Task: ${task.id}`);
@@ -1216,6 +1245,40 @@ async function cmdExecute(id, ...flags) {
   if (r.result !== 'DONE') process.exitCode = 1;
 }
 
+async function cmdResume(ref, ...flags) {
+  if (!ref) return usageError('usage: loopctl resume <RUN|TASK|PLAN> [--rerun-gates]');
+  if (flags.some((f) => f !== '--rerun-gates')) return usageError('resume accepts only --rerun-gates');
+  loadConfig().resumeRerunGates = flags.includes('--rerun-gates');
+  if (ref.startsWith('PLAN-')) return cmdExecutePlan(ref);
+  const resolved = resolveRunRef(ref);
+  if (!resolved.ok) return fail(resolved.reason);
+  const latest = latestRunForTask(resolved.run.taskId);
+  if (latest?.runId !== resolved.run.runId) return fail('resume requires the latest run for this task');
+  return cmdExecute(resolved.run.taskId);
+}
+
+async function cmdStart(...args) {
+  const files = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] !== '--file' || !args[i + 1] || args[i + 1].startsWith('--')) return usageError('usage: loopctl start --file <goal.md> [--file <next-phase.md> ...]');
+    files.push(args[++i]);
+  }
+  if (!files.length) return usageError('usage: loopctl start --file <goal.md> [--file <next-phase.md> ...]');
+  let interrupted = false;
+  const stop = () => { interrupted = true; };
+  process.on('SIGINT', stop);
+  try {
+    const out = await runWorkflow({ files, config: loadConfig(), isInterrupted: () => interrupted, emit: (e) => {
+      if (e.event === 'phase') console.log(`Phase: ${e.file} (${e.plan_id})`);
+      if (e.event === 'task-start' || e.event === 'task-end') console.log(`${e.task_id}: ${e.result ?? 'starting'}`);
+    } });
+    console.log(`Workflow: ${out.result}\nRecord: ${rel(out.path)}`);
+    if (out.detail) console.log(out.detail);
+    if (out.plan_id) console.log(`Inspect: loopctl plan-show ${out.plan_id}`);
+    if (out.result !== 'DONE') process.exitCode = 1;
+  } finally { process.off('SIGINT', stop); }
+}
+
 /**
  * execute-plan — 승인된 Plan의 Task를 **한 번에 하나씩** 끝까지 실행한다.
  *
@@ -1266,7 +1329,7 @@ async function cmdExecutePlan(ref, ...flags) {
 
   console.log(`Plan: ${plan.planId}`);
   console.log(`Tasks: ${plan.taskIds.join(', ')}`);
-  console.log('One task at a time — this runtime shares one working tree.');
+  console.log(config.efficiency.isolate_workers ? `Isolated workers: up to ${config.efficiency.max_parallel_workers}; integration and final checks are sequential.` : 'One task at a time — this runtime shares one working tree.');
 
   let currentAttempt = null;
   const emit = (e) => {
@@ -1802,7 +1865,7 @@ function cmdDoctor() {
   if (reportErrors(tasks) || gateProblems || graphProblems || !ok) process.exitCode = 1;
 }
 
-const RUNTIME_VERSION = 'Loop Runtime V0';
+const RUNTIME_VERSION = 'Loop Runtime V0.2';
 
 const VERSION_TEXT = [
   RUNTIME_VERSION,
@@ -1836,19 +1899,22 @@ Plan
   plan-approve <PLAN>         승인 -> canonical Task 생성  (AI 호출 없음 · 실행하지 않음)
 
 Execute
+  start --file <goal.md>      지정한 목표의 계획·승인·실행을 한 번에 (명시적 범위 승인)
+                              여러 --file로 Phase 순서 지정; 같은 명령으로 재개
+  resume <RUN|TASK|PLAN>      중단 단계부터 재개; --rerun-gates로 현재 변경을 인정하고 재검사
   run <TASK>                  Worker 1회 실행         --adapter --timeout --model
   gate <RUN|TASK>             결정론적 Gate 실행       --rerun            (AI 호출 없음)
   verify <RUN|TASK>           독립 Verifier 1회 실행   --rerun --adapter --model --timeout
   retry <RUN|TASK>            진단 기반 Worker 재시도 1회  --adapter --timeout --model
   execute <TASK>              DONE 또는 정지 조건까지 Task 루프 실행  --timeout --adapter --model
   self-check [<gate> ...]     설정된 Gate 명령만 참고용으로 실행   (AI 호출 없음 · 판정 아님)
-  execute-plan <PLAN>         승인된 Plan의 Task를 한 번에 하나씩 순차 실행  --timeout --adapter --model
+  execute-plan <PLAN>         승인된 Plan 실행·재개 (설정에 따라 Worker 격리·병렬화)  --timeout --adapter --model
                               (오케스트레이션 판단은 결정론적 · 추가 AI 호출 없음)
 
 Inspect Runs
   diagnose <RUN|TASK>         실패 진단 · Failure Memo (읽기 전용 · AI 호출 없음)
   execution <EXEC|TASK>       기록된 Execution Report
-  usage <RUN|TASK>            기록된 Worker telemetry
+  usage [RUN|TASK|PLAN|--all]  개별 Worker telemetry 또는 전체 단계·비용·토큰 집계
   verification <RUN|TASK>     기록된 Verification Report
 
 Low-level
@@ -1867,13 +1933,14 @@ Other
 
   Run ID가 정본이다. Task ID는 Runtime이 결정론적으로 해석할 때만 쓸 수 있는 편의 입력이다.
   execute는 Worker -> Gate -> Verifier -> Diagnose -> Retry를 자동으로 잇는다.
-  execute-plan은 그 execute를 Plan의 Task에 대해 한 번에 하나씩 순서대로 부른다.
+  execute-plan은 최종 검증을 순서대로 수행하며, 격리된 독립 Worker는 병렬 실행할 수 있다.
   사람이 필요한 정지에서 즉시 멈추고, 다시 실행하면 남은 Task부터 이어간다.
   계획은 승인 전까지 Task를 만들지 않고, 승인은 Task를 실행하지 않는다.
   선행 Task(depends_on)가 DONE이 아니면 그 Task는 READY가 아니며 run/execute가 거부된다.
   낮은 수준 명령은 디버깅·수동 제어용으로 그대로 남아 있다. Task 하나만 실행한다.`;
 
 const commands = {
+  start: cmdStart, resume: cmdResume,
   status: cmdStatus, doctor: cmdDoctor,
   tasks: cmdTasks, show: cmdShow, ready: cmdReady, 'verify-ready': cmdVerifyReady,
   gates: cmdGates, adapters: cmdAdapters, 'self-check': cmdSelfCheck,
@@ -1898,7 +1965,10 @@ if (!run) {
   console.error("run `loopctl help` to see the available commands.");
   process.exitCode = 2;
 } else {
+  let release;
   try {
+    if (new Set(['plan', 'plan-approve', 'run', 'gate', 'verify', 'retry', 'execute', 'execute-plan', 'transition', 'snapshot', 'resume', 'start']).has(cmd)) release = acquireOperationLock(cmd);
+    if (args.includes('--model') && cmd !== 'plan') loadConfig().workerModelExplicit = true;
     await run(...args);
   } catch (e) {
     // 예상 가능한 운영자 실수에는 stack trace를 보이지 않는다.
@@ -1906,5 +1976,7 @@ if (!run) {
     fail(`error: ${e.message}`);
     if (process.env.LOOPCTL_DEBUG) console.error(e.stack);
     else console.error('  (set LOOPCTL_DEBUG=1 for the full stack trace)');
+  } finally {
+    release?.();
   }
 }

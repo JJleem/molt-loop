@@ -1,5 +1,10 @@
 # molt-loop — Loop Runtime Starter Pack
 
+현재 사용법: [Runtime 사용법과 효율 개선](docs/RUNTIME-USAGE.md).
+기존 명령은 유지한다. `start --file ...`로 승인한 범위를 한 번에 진행하고,
+`resume`으로 중단 단계부터 복구하며, `usage --all`로 단계별 시간·누적 비용을 확인할 수 있다.
+Worker 격리·제한 병렬화·Gate-only 완료는 프로젝트 설정으로 제어한다.
+
 AI Worker에게 프로젝트를 맡기되, **완료 판정은 AI에게 맡기지 않는** 실행 런타임.
 
 목표 하나를 주면 Task로 쪼개고, Worker를 돌리고, 결정론적 Gate와 독립 Verifier로 검증하고,
@@ -180,7 +185,8 @@ Runtime이 canonical Task ID를 발급하고(`TASK-001`, `TASK-002`...), 제안 
 
 계획 시점 이후 저장소가 바뀌었으면 거부한다. `--force` 는 없다.
 
-**`execute-plan`** — Task를 **한 번에 하나씩** 순서대로 돌린다.
+**`execute-plan`** — 의존 순서대로 실행한다. 격리를 켜면 독립 Worker는 제한 병렬 실행하고,
+변경 반영·최종 Gate·Verifier는 순차 처리한다. 기존 설정의 기본 동작은 순차 실행이다.
 Task 하나마다 `Worker → Gate → Verifier → Diagnose → Retry` 루프가 돈다.
 사람이 필요한 정지에서 즉시 멈추고, 다시 실행하면 남은 Task부터 이어간다(플래그 불필요).
 
@@ -309,7 +315,9 @@ READY가 아니고 `run`·`execute` 가 거부한다. **상태는 `TODO` 그대�
 | `verify <RUN\|TASK>` | **1회** | 독립 Verifier 1회 실행 |
 | `retry <RUN\|TASK>` | **1회** | 진단 기반 재시도 1회 |
 | `execute <TASK>` | 여러 번 | 위를 정지 조건까지 자동으로 연결 |
-| `execute-plan <PLAN>` | 여러 번 | `execute` 를 Plan의 Task마다 순차 호출 |
+| `execute-plan <PLAN>` | 여러 번 | 승인한 Task 실행·재개. 설정에 따라 격리 Worker 병렬화 |
+| `start --file <GOAL>` | 여러 번 | 지정한 목표에 대한 승인과 계획·실행 연결. 여러 파일로 Phase 순서 지정 |
+| `resume <RUN\|TASK\|PLAN>` | 필요시 | 완료된 Worker 재호출 없이 중단 단계 재개 |
 | `plan-show` · `plans` · `plan-approve` | 없음 | Plan 열람 · 승인 |
 | `gate <RUN\|TASK>` | 없음 | 설정된 Gate 명령 실행 |
 | `self-check [<gate>]` | 없음 | Gate 명령 참고 실행 (판정 아님) |
@@ -378,7 +386,7 @@ Runtime 자체를 의심할 때:
 ```bash
 ./loopctl doctor                                  # 구조 점검
 ./loopctl validate                                # Task 전체 검증
-node --test "tools/loop-runtime/test/*.test.mjs"  # 139개 회귀 (AI 호출 0회)
+node --test "tools/loop-runtime/test/*.test.mjs"  # mock 회귀 (AI 호출 0회)
 ```
 
 Runtime 버그로 보이면 `LOOPCTL_DEBUG=1` 로 전체 stack을 볼 수 있다.
@@ -413,7 +421,7 @@ docs/
   plans/ · runs/ · executions/ · leases/ · staging/
 
 tools/loop-runtime/        Runtime 구현 (의존성 없는 Node ESM)
-  test/                    139개 결정론적 회귀 — mock adapter, AI 호출 0회
+  test/                    결정론적 회귀 — mock adapter, AI 호출 0회
 ```
 
 Runtime 내부 구조와 각 층의 설계 근거는 [`tools/loop-runtime/README.md`](tools/loop-runtime/README.md)에 있다.
@@ -495,16 +503,16 @@ Plan도 계획 시점 상태에 묶인다. 어긋나면 거부한다. `--force` 
 
 ## 아직 없는 것
 
-의도적으로 미룬 것들이다. 필요성이 실측으로 확인되기 전에는 만들지 않는다.
+실시간 비용 hard cap, 자동 replan/decompose, 배포·push·외부 메시지 전송은 제공하지 않는다.
 
 ```
-loopctl resume                 per-Task worktree 격리      parallel Task 실행
-sub-agent                      Research / Debug Agent      Goal 자동 승인
-Phase 자동 승인                multi-Phase full-auto       budget hard limit
-cost / token cap               자동 replan / decompose     Monitor
+실행 중 정밀 비용 차단         자동 replan / decompose      Monitor
+Research / Debug Agent         Goal 밖 작업 자동 발견
 ```
 
-`execute-plan` 은 공유 작업 트리에서 **한 번에 Task 하나씩** 돌린다. 병렬 실행은 없다.
+`resume`, 파일로 승인한 다중 Phase 실행, 호출 사이 예산 검사, 독립 복사본에서의 Worker 병렬화는
+구현되어 있다. OS sandbox·Git worktree 병합 기능과는 구분한다. 범위와 제한은
+[현재 사용법](docs/RUNTIME-USAGE.md)을 참고한다.
 
 무엇을 왜 미뤘는지, 어떤 실측이 어떤 기능을 정당화했는지는
 [`docs/LOOP-RUNTIME-FIELD-NOTES.md`](docs/LOOP-RUNTIME-FIELD-NOTES.md)에 있다.
@@ -513,10 +521,11 @@ cost / token cap               자동 replan / decompose     Monitor
 
 ## 라이선스 · 상태
 
-Loop Runtime **V0.1**. Phase 1 실사용을 거쳐 검증된 상태다.
+Loop Runtime **V0.2**. V0.1의 실사용 기록에 기반한 효율 개선판이다.
+새 기능은 mock 기반 회귀로 검증하며 실제 provider의 절약률은 별도 측정이 필요하다.
 
 ```
-Runtime 회귀   139 pass / 0 fail   (mock adapter, AI 호출 0회)
+Runtime 회귀   node --test "tools/loop-runtime/test/*.test.mjs" (AI 호출 0회)
 loopctl doctor exit 0
 ```
 

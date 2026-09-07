@@ -1,5 +1,11 @@
 # Loop Runtime — Field Notes
 
+> V0.2 유지보수: 과거 관찰 수치는 아래에 보존한다. 현재 기능과 제한은
+> [RUNTIME-USAGE.md](RUNTIME-USAGE.md)를 참고한다. CI-001(변경 경로 진단),
+> CI-002(재개), CI-004(비용 집계), CI-005(호출 사이 예산 검사)를 구현했다.
+> Worker 격리·제한 병렬화, Task 자료, 명시적 다중 Phase 실행도 추가했다.
+> 이는 새로운 실사용 비용 측정이 아니며, 실제 절약률은 아직 측정하지 않았다.
+
 > **이 문서는 Runtime 설계 근거(design provenance)다. 현재 프로젝트의 상태가 아니다.**
 >
 > 아래에 나오는 Task ID(`TASK-001` ~ `TASK-008`), Plan/Run/Execution ID, 비용($), 소요 시간,

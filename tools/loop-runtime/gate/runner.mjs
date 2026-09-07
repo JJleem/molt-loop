@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, LOCAL_DIR } from '../task-store.mjs';
+import { mapLimit } from '../concurrency.mjs';
 import { computeSubject, subjectRef, sameSubject } from '../subject.mjs';
 import { validateWorkerResult } from '../worker/result.mjs';
 import {
@@ -332,16 +333,24 @@ export function executeGate({ def, runDir, timeoutSeconds }) {
 export async function executeGateSuite({ task, run, config, required, gateConfig, onGateFinish }) {
   const startedAt = new Date();
   // Gate가 실제로 검사한 저장소 상태를 기록해 둔다. Verifier는 이 값과 대조한다.
-  const subject = subjectRef(computeSubject(ROOT));
+  const subject = computeSubject(ROOT);
   const gateResults = [];
-  for (const name of required.names) {
+  const runOne = async (name) => {
     const def = gateConfig.gates[name];
     const timeoutSeconds = gateTimeoutSeconds(config, def);
     const rec = await executeGate({ def, runDir: run.runDir, timeoutSeconds });
     writeFileSync(join(gateDir(run.runDir, name), 'result.json'), `${JSON.stringify(rec, null, 2)}\n`, 'utf8');
     for (const f of ['stdout.log', 'stderr.log', 'result.json']) freeze(join(gateDir(run.runDir, name), f));
-    gateResults.push(rec);
     onGateFinish?.(rec);
+    return rec;
+  };
+  const limit = config.efficiency?.max_parallel_gates ?? 1;
+  for (let i = 0; i < required.names.length;) {
+    const batch = [required.names[i++]];
+    if (gateConfig.gates[batch[0]].parallel_safe) {
+      while (i < required.names.length && gateConfig.gates[required.names[i]].parallel_safe) batch.push(required.names[i++]);
+    }
+    gateResults.push(...await mapLimit(batch, limit, runOne));
   }
   const finishedAt = new Date();
 

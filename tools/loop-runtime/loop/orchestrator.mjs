@@ -8,11 +8,15 @@
 
 import { writeFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { loadAllTasks, isValid, isExample, isPaused, LOCAL_DIR } from '../task-store.mjs';
+import { loadAllTasks, isValid, isExample, isPaused, LOCAL_DIR, writeStatus } from '../task-store.mjs';
+import { readFileSync } from 'node:fs';
 import { latestRunForTask } from '../gate/runner.mjs';
 import { startFirstAttempt, startRetryAttempt, stageWorker, stageGate, stageVerify } from '../stages.mjs';
 import { resolveNextAction } from './next-action.mjs';
 import { evaluateStop, loopGuardLimit } from './stop-evaluator.mjs';
+import { completeGateOnly } from '../gate/complete.mjs';
+import { checkBudget } from '../usage-ledger.mjs';
+import { integrateWorkspace } from '../worker/isolation.mjs';
 import {
   ACTIVE_DIR, allocateExecutionId, buildExecutionReport, buildUsageSummary,
   writeExecutionReport, executionDir, readActiveMarker, classifyActiveMarker,
@@ -104,6 +108,7 @@ export async function executeTask({ taskId, config, emit = () => {}, isInterrupt
   const attempts = new Map();   // attempt번호 -> 요약
   const touchedRuns = new Map(); // runId -> runDir
   let transitions = 0;
+  let recoveryRuns = 0;
 
   const record = (stage, extra) => {
     const e = { stage, ...extra };
@@ -125,6 +130,8 @@ export async function executeTask({ taskId, config, emit = () => {}, isInterrupt
   let stopReason = null;
 
   writeClaim(taskId, execId);
+  const heartbeat = setInterval(() => writeClaim(taskId, execId), 15_000);
+  heartbeat.unref();
   try {
     for (;;) {
       if (transitions >= guardLimit) {
@@ -144,6 +151,14 @@ export async function executeTask({ taskId, config, emit = () => {}, isInterrupt
       const task = reloaded.task;
 
       const next = resolveNextAction({ task, config });
+      if (['RUN_WORKER', 'RETRY_WORKER', 'RUN_VERIFIER'].includes(next.action)) {
+        const budget = checkBudget({ config, taskId });
+        if (!budget.allowed) {
+          result = 'LIMIT_REACHED'; stopReason = 'USAGE_BUDGET_EXHAUSTED';
+          record('stop', { result, reason: stopReason, detail: budget.reasons.join('; ') });
+          break;
+        }
+      }
       const deadlineExceeded = deadlineMs !== null && Date.now() > deadlineMs;
       const verdict = evaluateStop({
         next,
@@ -167,6 +182,31 @@ export async function executeTask({ taskId, config, emit = () => {}, isInterrupt
 
       transitions += 1;
 
+      if (next.action === 'APPLY_WORKER_RESULT' || next.action === 'RECOVER_DONE') {
+        noteRun(next.run);
+        const moved = writeStatus(task, next.action === 'RECOVER_DONE' ? 'DONE' : next.requested);
+        if (!moved.ok) throw new Error(moved.reason);
+        record('recovery', { run_id: next.run.runId, result: `${moved.from} -> ${moved.to}`, detail: next.reason });
+        continue;
+      }
+
+      if (next.action === 'INTEGRATE_WORKER') {
+        noteRun(next.run);
+        const integrated = integrateWorkspace(next.run.runDir);
+        if (!integrated.ok) {
+          result = 'NEEDS_HUMAN'; stopReason = 'INTEGRATION_CONFLICT';
+          record('stop', { result, reason: stopReason, detail: integrated.reason });
+          break;
+        }
+        const env = JSON.parse(readFileSync(join(next.run.runDir, 'runtime-envelope.json'), 'utf8'));
+        if (!env.failures?.length && ['REVIEW', 'BLOCKED'].includes(env.worker_requested_transition)) {
+          const moved = writeStatus(task, env.worker_requested_transition);
+          if (!moved.ok) throw new Error(moved.reason);
+        }
+        record('integration', { run_id: next.run.runId, result: 'integrated' });
+        continue;
+      }
+
       // --- 정확히 하나의 행동만 수행한다.
       if (next.action === 'RUN_WORKER') {
         const start = startFirstAttempt({ task, config });
@@ -177,6 +217,7 @@ export async function executeTask({ taskId, config, emit = () => {}, isInterrupt
         }
         noteRun({ runId: start.snapshot.runId, runDir: start.snapshot.runDir });
         attemptEntry(1, start.snapshot.runId);
+        writeClaim(taskId, execId, { stage: 'worker', run_id: start.snapshot.runId, attempt: 1 });
         const w = await stageWorker({ task, snapshot: start.snapshot, config, attempt: 1 });
         const a = attemptEntry(1, start.snapshot.runId);
         a.worker = w.ok ? (w.transition?.to ?? 'no-transition') : 'failed';
@@ -200,6 +241,7 @@ export async function executeTask({ taskId, config, emit = () => {}, isInterrupt
         transitions += 1;
         noteRun({ runId: started.snapshot.runId, runDir: started.snapshot.runDir });
         attemptEntry(started.attempt, started.snapshot.runId);
+        writeClaim(taskId, execId, { stage: 'worker', run_id: started.snapshot.runId, attempt: started.attempt });
         const w = await stageWorker({ task, snapshot: started.snapshot, config, attempt: started.attempt });
         const a = attemptEntry(started.attempt, started.snapshot.runId);
         a.worker = w.ok ? (w.transition?.to ?? 'no-transition') : 'failed';
@@ -209,10 +251,25 @@ export async function executeTask({ taskId, config, emit = () => {}, isInterrupt
         continue;
       }
 
-      if (next.action === 'RUN_GATES') {
+      if (next.action === 'COMPLETE_GATES') {
+        noteRun(next.run);
+        const moved = completeGateOnly({ task, run: next.run, config });
+        record('completion', { run_id: next.run.runId, result: 'PASS', method: 'gate-only', transition: `${moved.from} -> ${moved.to}` });
+        continue;
+      }
+
+      if (next.action === 'RUN_GATES' || next.action === 'RERUN_GATES') {
+        const rerun = next.action === 'RERUN_GATES';
+        if (rerun && recoveryRuns++ >= 1) {
+          result = 'NEEDS_HUMAN'; stopReason = 'UNSTABLE_SUBJECT';
+          record('stop', { result, reason: stopReason, detail: next.reason });
+          break;
+        }
+        if (rerun) record('recovery', { result: 'RERUN_GATES', detail: next.reason, subject_sha256: next.recovery.subject_sha256 });
         const run = next.run ?? latestRunForTask(taskId);
         noteRun(run);
-        const g = await stageGate({ task, run, config });
+        writeClaim(taskId, execId, { stage: 'gate', run_id: run.runId });
+        const g = await stageGate({ task, run, config, rerun });
         if (!g.ok) {
           result = 'NEEDS_HUMAN'; stopReason = 'GATE_NOT_ELIGIBLE';
           record('stop', { result, reason: stopReason, detail: g.errors.join(' ') });
@@ -231,7 +288,8 @@ export async function executeTask({ taskId, config, emit = () => {}, isInterrupt
       if (next.action === 'RUN_VERIFIER') {
         const run = next.run ?? latestRunForTask(taskId);
         noteRun(run);
-        const v = await stageVerify({ task, run, config });
+        writeClaim(taskId, execId, { stage: 'verifier', run_id: run.runId });
+        const v = await stageVerify({ task, run, config, rerun: next.rerun === true });
         if (!v.ok && v.refused) {
           result = 'NEEDS_HUMAN'; stopReason = 'VERIFIER_NOT_ELIGIBLE';
           record('stop', { result, reason: stopReason, detail: v.errors.join(' ') });
@@ -259,6 +317,7 @@ export async function executeTask({ taskId, config, emit = () => {}, isInterrupt
       break;
     }
   } finally {
+    clearInterval(heartbeat);
     releaseClaim(taskId);
   }
 

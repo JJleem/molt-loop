@@ -53,7 +53,7 @@ function distill({ diagnosis, runDir }) {
       const names = gates.map((g) => g.name).join(', ');
       return {
         lesson: `Attempt ${d.attempt} did not pass the deterministic gate(s): ${gates.map((g) => `${g.name} exited ${g.exit_code}`).join(', ')}.`,
-        recovery_hint: `Run the ${names} gate command locally, read the failure output, and fix the cause before returning. `
+        recovery_hint: `Run node tools/loop-runtime/loopctl.mjs self-check ${gates.map((g) => g.name).join(' ')}, read the failure output, and fix the cause before returning. `
           + 'Do not delete, skip, or weaken tests to make the gate pass.',
         failed_gates: gates,
         failed_criteria: [],
@@ -84,7 +84,7 @@ function distill({ diagnosis, runDir }) {
       const errs = d.detail?.schema_errors ?? [];
       return {
         lesson: `Attempt ${d.attempt} did not produce a valid Worker Result: ${errs.join('; ') || 'the result file was missing.'}`,
-        recovery_hint: 'Do the work, then write exactly one Worker Result JSON to the path the runtime protocol specifies, '
+        recovery_hint: 'First inspect the existing implementation and preserve correct work; do not restart implementation merely because the result format failed. Write exactly one Worker Result JSON to the path the runtime protocol specifies, '
           + 'with the run_id and task_id it gave you. Conversational output is not a result.',
         failed_gates: [],
         failed_criteria: [],
@@ -93,7 +93,7 @@ function distill({ diagnosis, runDir }) {
     case 'TIMEOUT':
       return {
         lesson: `Attempt ${d.attempt} exceeded the worker timeout and was killed before producing a result.`,
-        recovery_hint: 'Spend less time exploring. Decide on the smallest change that satisfies the acceptance criteria, '
+        recovery_hint: 'Resume from existing changes. Split remaining work into a short ordered checklist without changing scope or acceptance criteria. Spend less time exploring. Decide on the smallest change that satisfies the acceptance criteria, '
           + 'make it, and write the result file early rather than at the very end.',
         failed_gates: [],
         failed_criteria: [],

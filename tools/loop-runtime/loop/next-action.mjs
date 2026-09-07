@@ -8,18 +8,23 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { validateWorkerResult } from '../worker/result.mjs';
 import { ROOT, isExample, isAutoDispatchable } from '../task-store.mjs';
 import { computeSubject, subjectRef } from '../subject.mjs';
 import { latestRunForTask, deriveVerifyReady } from '../gate/runner.mjs';
 import { readGateReport } from '../gate/report.mjs';
 import { readVerificationReport } from '../verifier/report.mjs';
 import { verificationDirFor } from '../verifier/runner.mjs';
+import { priorVerificationAttempts } from '../verifier/report.mjs';
 import { assess } from '../recovery/retry.mjs';
 import { RETRYABLE_ACTIONS, readDiagnosis } from '../recovery/diagnose.mjs';
 import { attemptHistory } from '../recovery/limits.mjs';
+import { assessResume } from '../recovery/resume.mjs';
+import { workerRecoverySubject } from '../recovery/integration-subject.mjs';
 
 export const ACTIONS = [
-  'RUN_WORKER', 'RUN_GATES', 'RUN_VERIFIER', 'RETRY_WORKER', 'DONE',
+  'RUN_WORKER', 'INTEGRATE_WORKER', 'APPLY_WORKER_RESULT', 'RECOVER_DONE', 'RUN_GATES', 'RERUN_GATES', 'COMPLETE_GATES', 'RUN_VERIFIER', 'RETRY_WORKER', 'DONE',
   'STOP_BLOCKED', 'STOP_NEEDS_HUMAN', 'STOP_LIMIT', 'STOP_STALLED', 'STOP_AMBIGUOUS', 'STOP_REFUSED',
 ];
 
@@ -50,8 +55,8 @@ export function detectStagnation({ task, run, diagnosis }) {
     if (!existsSync(p)) return null;
     try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return null; }
   };
-  const a = envOf(parent.runDir)?.verification_subject_after?.sha256 ?? null;
-  const b = envOf(current.runDir)?.verification_subject_after?.sha256 ?? null;
+  const a = workerRecoverySubject(parent.runDir, envOf(parent.runDir))?.sha256 ?? null;
+  const b = workerRecoverySubject(current.runDir, envOf(current.runDir))?.sha256 ?? null;
   if (!a || !b || a !== b) return null;   // 증명할 수 없으면 발동하지 않는다
 
   return {
@@ -67,6 +72,14 @@ export function detectStagnation({ task, run, diagnosis }) {
 function recoveryAction({ task, run, config, subject }) {
   const assessment = assess({ task, run, config, subject });
   const { diagnosis, budget } = assessment;
+  // A broken auditor is not a reason to pay for another implementation attempt.
+  // Persisted verification history bounds this across process restarts.
+  if (config.efficiency?.adaptive_recovery && diagnosis.stage === 'verifier'
+      && ['PROCESS_CRASH', 'TIMEOUT', 'SCHEMA_FAILURE'].includes(diagnosis.failure_class)
+      && diagnosis.subject_check?.matches
+      && priorVerificationAttempts(verificationDirFor(run.runDir)) < 1) {
+    return A('RUN_VERIFIER', `${diagnosis.failure_class}: retry the verifier once, leaving implementation unchanged`, { run, rerun: true });
+  }
 
   if (diagnosis.failure_class === null) {
     return A('STOP_AMBIGUOUS', `${run.runId} shows no failure but the task is not finished.`, { assessment });
@@ -111,11 +124,32 @@ export function resolveNextAction({ task, config }) {
   if (status === 'TODO') return A('RUN_WORKER', 'first attempt');
 
   const run = latestRunForTask(task.id);
+  if (run) {
+    const path = join(run.runDir, 'integration.json');
+    if (existsSync(path)) {
+      try {
+        const integration = JSON.parse(readFileSync(path, 'utf8'));
+        if (integration.status === 'pending') return A('INTEGRATE_WORKER', 'resume pending workspace integration', { run });
+        if (integration.status === 'rejected') return A('STOP_AMBIGUOUS', integration.reason, { run });
+      } catch { return A('STOP_AMBIGUOUS', 'integration journal is unreadable', { run }); }
+    }
+  }
 
   if (status === 'IN_PROGRESS') {
     if (!run) {
       return A('STOP_AMBIGUOUS', `${task.id} is IN_PROGRESS but has no completed worker run; the runtime cannot tell whether a worker is still executing.`);
     }
+    // A crash can happen after the envelope is saved but before applying the validated request.
+    try {
+      const env = JSON.parse(readFileSync(join(run.runDir, 'runtime-envelope.json'), 'utf8'));
+      const raw = JSON.parse(readFileSync(join(run.runDir, 'worker-result.json'), 'utf8'));
+      const parsed = validateWorkerResult(raw, { runId: run.runId, taskId: task.id });
+      const taskHash = createHash('sha256').update(readFileSync(task.file)).digest('hex');
+      const originalHash = run.manifest.sources?.find((s) => s.kind === 'task')?.sha256;
+      if (taskHash === originalHash && parsed.valid && env.worker_result_valid && !env.policy_violation && env.process?.exit_code === 0 && !env.process?.timed_out && !env.process?.launch_error && !env.failures?.length && ['REVIEW', 'BLOCKED'].includes(parsed.result.requested_transition)) {
+        return A('APPLY_WORKER_RESULT', 'completed worker envelope exists; applying its validated transition', { run, requested: parsed.result.requested_transition });
+      }
+    } catch { /* Broken evidence follows the existing diagnostic path. */ }
     return recoveryAction({ task, run, config, subject });
   }
 
@@ -127,6 +161,11 @@ export function resolveNextAction({ task, config }) {
   const vr = readVerificationReport(verificationDirFor(run.runDir));
   if (vr && !vr.corrupt) {
     if (vr.result === 'PASS') {
+      const currentPass = vr.verification_subject_sha256 === subject.sha256 && subject.sha256 && vr.verification_subject_stable && vr.gate_result === 'PASS' && !vr.worker_policy_violation && !vr.verifier_policy_violation && vr.blockers?.length === 0 && task.data.acceptance_criteria.length > 0 && task.data.acceptance_criteria.every((c) => vr.acceptance_criteria?.some((v) => v.id === c.id && v.status === 'PASS'));
+      const authorizedMethod = vr.completion_method === 'gate-only'
+        ? config.efficiency?.gate_only_completion && !task.data.stop_condition.requires_verifier && task.data.acceptance_criteria.every((c) => c.verification.type === 'gate')
+        : vr.verifier_result_valid && vr.verifier_result === 'PASS';
+      if (currentPass && authorizedMethod) return A('RECOVER_DONE', 'current PASS evidence was saved before the DONE transition', { run });
       // PASS인데 DONE이 아니다 — Runtime 상태가 서로 맞지 않는다. 추측하지 않는다.
       return A('STOP_AMBIGUOUS', `${run.runId} has a PASS verification report but ${task.id} is still REVIEW.`);
     }
@@ -141,12 +180,17 @@ export function resolveNextAction({ task, config }) {
   const v = deriveVerifyReady({ task, config });
   if (v.stale) {
     // Gate 결과가 지금의 저장소 상태에 묶여 있지 않다. 공유 작업 트리에서 원인을 증명할 수 없다.
+    const recovery = assessResume(gate, config);
+    if (recovery.allowed) return A('RERUN_GATES', recovery.detail, { run, recovery });
     return A('STOP_AMBIGUOUS',
-      'the repository changed after gates ran; the runtime cannot prove that rerunning gates is safe.', { run });
+      `the repository changed after gates ran; ${recovery.detail}. ${recovery.protectedChange ? 'Control-plane changes require review and an explicit gate --rerun before resuming.' : `Inspect, then use loopctl resume ${task.id} --rerun-gates to acknowledge the current subject.`}`, { run, recovery });
   }
   if (gate.result !== 'PASS') return recoveryAction({ task, run, config, subject });
 
   if (!v.requiresVerifier) {
+    if (config.efficiency?.gate_only_completion && task.data.acceptance_criteria.length > 0 && task.data.acceptance_criteria.every((c) => c.verification.type === 'gate')) {
+      return A('COMPLETE_GATES', 'all acceptance criteria use deterministic gates; gate-only policy enabled', { run });
+    }
     return A('STOP_NEEDS_HUMAN',
       `${task.id} passed its gates but requires no independent verification; gate-only completion is not implemented.`, { run });
   }

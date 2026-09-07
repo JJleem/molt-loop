@@ -13,6 +13,7 @@ import { computeSubject, subjectRef, sameSubject } from '../subject.mjs';
 import { readGateReport } from '../gate/report.mjs';
 import { readVerificationReport } from '../verifier/report.mjs';
 import { verificationDirFor } from '../verifier/runner.mjs';
+import { workerRecoverySubject } from './integration-subject.mjs';
 
 export const RECOVERY_DIR = 'recovery';
 export const DIAGNOSIS_FILE = 'diagnosis.json';
@@ -44,7 +45,7 @@ export function readDiagnosis(runDir) {
 /** 진단이 근거로 삼은 artifact들의 지문. 증거가 그대로면 진단을 다시 만들지 않는다. */
 function evidenceFingerprint(runDir) {
   const parts = [];
-  for (const f of ['runtime-envelope.json', 'gate-report.json', 'verification/verification-report.json']) {
+  for (const f of ['runtime-envelope.json', 'integration.json', 'worker-started.json', 'gate-report.json', 'verification/verification-report.json']) {
     const p = join(runDir, f);
     parts.push(`${f}:${existsSync(p) ? sha256(readFileSync(p, 'utf8')) : 'absent'}`);
   }
@@ -287,12 +288,12 @@ export function computeDiagnosis({ task, run, config, subject = null }) {
   // 권위 있는 지문이 없으면 안전을 단정하지 않는다(fail-closed).
   const bound = stage === 'verifier' || stage === 'gate'
     ? gateReport?.verification_subject ?? null
-    : env?.verification_subject_after ?? null;
+    : workerRecoverySubject(runDir, env);
   const subjectCheck = {
     bound_to: bound?.sha256 ?? null,
     current: current.sha256,
     matches: bound ? sameSubject(bound, current) : false,
-    source: stage === 'worker' ? 'runtime-envelope.verification_subject_after' : 'gate-report.verification_subject',
+    source: stage === 'worker' ? (existsSync(join(runDir, 'integration.json')) ? 'integration.main_subject_after' : 'runtime-envelope.verification_subject_after') : 'gate-report.verification_subject',
   };
 
   let failureClass = found.failure_class;

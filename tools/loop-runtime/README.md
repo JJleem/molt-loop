@@ -1,4 +1,9 @@
-# loop-runtime (V0)
+# loop-runtime (V0.2)
+
+현재 운영 명령과 설정은 [Runtime 사용법](../../docs/RUNTIME-USAGE.md)에 정리했다.
+V0.2는 Task 자료, 누적 예산 검사, resume, Gate-only 완료, 명시적 Phase 자동 진행,
+격리 Worker와 제한 병렬 Gate를 추가한다. 아래 V0/V0.1 단계별 설명 중 “아직 없음”은
+해당 단계 당시의 기록이다. 현재 지원 여부는 위 문서와 `loopctl help`를 기준으로 한다.
 
 Loop Engineering Runtime의 구현. 설계 원본은 `.loop/DESIGN.md`이며, Worker에게는 전달되지 않는다.
 
@@ -28,7 +33,7 @@ REM Windows (cmd / PowerShell)
 진입점은 인자를 그대로 넘기고 exit code를 그대로 돌려주는 얇은 wrapper다
 (`loopctl.cmd` · `loopctl`). Runtime 로직은 들어 있지 않다.
 
-Worker · Gate · Verifier는 **각각 명시적으로 호출한다.** 자동 연결은 아직 없다.
+Worker · Gate · Verifier를 각각 호출할 수도 있고 `execute`로 자동 연결할 수도 있다.
 
 ```text
 loopctl run <TASK>       Worker 1회      (AI 호출)

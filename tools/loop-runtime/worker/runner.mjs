@@ -9,6 +9,7 @@ import { join, relative } from 'node:path';
 import { ROOT } from '../task-store.mjs';
 import { computeSubject, subjectRef } from '../subject.mjs';
 import { getAdapter } from '../adapters/index.mjs';
+import { assertBudget } from '../usage-ledger.mjs';
 import { validateWorkerResult, OUTCOMES } from './result.mjs';
 import { contextMetrics, outputMetrics, normalizeTokens, observeChanges, diffObserved } from './telemetry.mjs';
 import {
@@ -102,6 +103,7 @@ export function resultProtocol({ runId, taskId, resultPath }) {
  * Task 상태는 건드리지 않는다. 판단에 필요한 사실만 돌려준다.
  */
 export async function runWorkerOnce({ task, snapshot, config, attempt = 1 }) {
+  assertBudget(config, task.id);
   const adapterName = config.runtime.worker_adapter;
   const adapter = getAdapter(adapterName);
   const availability = await adapter.detect();
@@ -125,6 +127,7 @@ export async function runWorkerOnce({ task, snapshot, config, attempt = 1 }) {
   const subjectBefore = subjectRef(computeSubject(ROOT));
 
   const startedAt = new Date();
+  writeFileSync(join(runDir, 'worker-started.json'), JSON.stringify({ started_at: startedAt.toISOString(), task_id: task.id, run_id: snapshot.runId }));
   const proc = await adapter.runWorker({
     runId: snapshot.runId,
     taskId: task.id,

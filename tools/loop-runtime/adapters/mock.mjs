@@ -45,7 +45,7 @@ export async function detect() {
   return { available: true, version: 'mock (runtime test double)' };
 }
 
-export async function runWorker({ resultPath, timeoutMs, runId, taskId }) {
+export async function runWorker({ resultPath, timeoutMs, runId, taskId, model = null }) {
   const started = Date.now();
   const sleep = Number(process.env.LOOP_MOCK_SLEEP_MS ?? 0);
   if (sleep > 0) {
@@ -61,7 +61,7 @@ export async function runWorker({ resultPath, timeoutMs, runId, taskId }) {
   }
   if (process.env.LOOP_MOCK_TOUCH) appendFileSync(process.env.LOOP_MOCK_TOUCH, '\n# mock worker was here\n');
   if (process.env.LOOP_MOCK_WRITE_PATH) {
-    writeFileSync(process.env.LOOP_MOCK_WRITE_PATH, process.env.LOOP_MOCK_WRITE_BODY ?? '', 'utf8');
+    writeFileSync(process.env.LOOP_MOCK_WRITE_PATH.replaceAll('__TASK__', taskId), (process.env.LOOP_MOCK_WRITE_BODY ?? '').replaceAll('__TASK__', taskId), 'utf8');
   }
   if (process.env.LOOP_MOCK_RESULT !== undefined) {
     const body = process.env.LOOP_MOCK_RESULT.replaceAll('__RUN__', runId).replaceAll('__TASK__', taskId);
@@ -78,8 +78,8 @@ export async function runWorker({ resultPath, timeoutMs, runId, taskId }) {
     stdout: 'mock worker stdout\n',
     stderr: '',
     provider_usage: process.env.LOOP_MOCK_USAGE ? JSON.parse(process.env.LOOP_MOCK_USAGE) : null,
-    model: null,
-    adapter_meta: { mock: true },
+    model,
+    adapter_meta: { mock: true, provider_cost_usd: process.env.LOOP_MOCK_COST === undefined ? null : Number(process.env.LOOP_MOCK_COST) },
   };
 }
 
@@ -139,7 +139,7 @@ export async function runVerifier({ timeoutMs, runId, taskId, subjectSha256 }) {
     provider_usage: process.env.LOOP_MOCK_VERIFIER_USAGE ? JSON.parse(process.env.LOOP_MOCK_VERIFIER_USAGE) : null,
     model: process.env.LOOP_MOCK_VERIFIER_MODEL ?? null,
     structured_output: structured,
-    adapter_meta: { mock: true },
+    adapter_meta: { mock: true, provider_cost_usd: process.env.LOOP_MOCK_VERIFIER_COST === undefined ? null : Number(process.env.LOOP_MOCK_VERIFIER_COST) },
   };
 }
 
@@ -188,6 +188,6 @@ export async function runPlanner({ timeoutMs, planId, subjectSha256 }) {
     provider_usage: process.env.LOOP_MOCK_PLANNER_USAGE ? JSON.parse(process.env.LOOP_MOCK_PLANNER_USAGE) : null,
     model: process.env.LOOP_MOCK_PLANNER_MODEL ?? null,
     structured_output: structured,
-    adapter_meta: { mock: true },
+    adapter_meta: { mock: true, provider_cost_usd: process.env.LOOP_MOCK_PLANNER_COST === undefined ? null : Number(process.env.LOOP_MOCK_PLANNER_COST) },
   };
 }

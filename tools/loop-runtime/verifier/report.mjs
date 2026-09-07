@@ -38,7 +38,7 @@ export function priorVerificationAttempts(verificationDir) {
 /** --rerun 시 이전 Verifier 산출물(사용량 기록 포함)을 파괴하지 않고 history/<n>/ 으로 옮긴다. */
 export function archivePriorVerification(verificationDir) {
   const movable = [
-    'context.md', 'manifest.json', 'subject.json', 'canonical-diff.patch',
+    'context.md', 'manifest.json', 'subject.json', 'canonical-diff.patch', 'verifier-started.json',
     'verifier-result.json', 'verifier-envelope.json', VERIFICATION_REPORT_FILE,
     'stdout.log', 'stderr.log',
   ].filter((f) => existsSync(join(verificationDir, f)));

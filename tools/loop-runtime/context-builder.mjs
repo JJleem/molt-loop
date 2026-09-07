@@ -12,6 +12,8 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from 'n
 import { createHash } from 'node:crypto';
 import { join, relative } from 'node:path';
 import { ROOT, LOCAL_DIR, KERNEL_PATH, SKILLS_DIR } from './task-store.mjs';
+import { buildTaskResources } from './task-resources.mjs';
+import { loadConfig } from './config.mjs';
 
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 const rel = (p) => relative(ROOT, p).split('\\').join('/');
@@ -108,6 +110,7 @@ export function buildContext(task, { failureMemos = [] } = {}) {
     section('TASK', taskLines.join('\n')),
     section('ACCEPTANCE CRITERIA', ac),
     section('FAILURE MEMO', memo),
+    ...(loadConfig().efficiency.task_resources ? [section('TASK RESOURCES', buildTaskResources(task))] : []),
   ].join('\n');
 
   return { context, sources: { role, kernel: KERNEL_PATH, skill: skillPath, task: task.file } };

@@ -14,6 +14,9 @@ import {
 } from './task-store.mjs';
 import { writeSnapshot } from './context-builder.mjs';
 import { runWorkerOnce } from './worker/runner.mjs';
+import { runIsolatedWorker } from './worker/isolation.mjs';
+import { checkBudget } from './usage-ledger.mjs';
+import { loadGateConfig, checkGateRefs, resolveRequiredGates } from './gate/resolver.mjs';
 import {
   checkEligibility, executeGateSuite, readGateReport, archivePriorGateEvidence,
 } from './gate/runner.mjs';
@@ -29,6 +32,8 @@ import { checkRetryEligibility, writeRetrySnapshot } from './recovery/retry.mjs'
  * @returns {{ ok, errors, claim?, snapshot? }}
  */
 export function startFirstAttempt({ task, config, tasks = null }) {
+  const budget = checkBudget({ config, taskId: task.id });
+  if (!budget.allowed) return { ok: false, errors: budget.reasons };
   if (isPaused()) {
     return { ok: false, errors: [`PAUSE is active (${join(LOCAL_DIR, 'PAUSE')}).`, '  Remove that file to run workers.'] };
   }
@@ -63,6 +68,11 @@ export function startFirstAttempt({ task, config, tasks = null }) {
     return { ok: false, errors: lines, dependencies: deps };
   }
 
+  const gc = loadGateConfig(config);
+  const gateErrors = [...gc.errors, ...checkGateRefs(task, gc)];
+  for (const name of resolveRequiredGates(task).names) if (gc.gates[name] && !gc.gates[name].enabled) gateErrors.push(`required gate ${name} is disabled; prepare gates before launching the worker`);
+  if (gateErrors.length) return { ok: false, errors: gateErrors };
+
   const claim = writeStatus(task, 'IN_PROGRESS');
   if (!claim.ok) return { ok: false, errors: [claim.reason] };
   task.data.status = 'IN_PROGRESS';
@@ -81,6 +91,8 @@ export function startFirstAttempt({ task, config, tasks = null }) {
  * @returns {{ ok, errors, pre, transition?, snapshot?, attempt? }}
  */
 export function startRetryAttempt({ task, run, config }) {
+  const budget = checkBudget({ config, taskId: task.id });
+  if (!budget.allowed) return { ok: false, errors: budget.reasons };
   const pre = checkRetryEligibility({ task, run, config });
   if (!pre.ok) return { ok: false, errors: pre.errors, pre };
 
@@ -108,9 +120,12 @@ export function startRetryAttempt({ task, run, config }) {
  * @returns {{ ok, envelope?, workerResult?, failures, transition: object|null, launchError?: string }}
  */
 export async function stageWorker({ task, snapshot, config, attempt }) {
+  if (!config.workerModelExplicit && attempt === 1 && config.efficiency?.worker_simple_model && !task.data.stop_condition.requires_verifier && task.data.acceptance_criteria.length > 0 && task.data.acceptance_criteria.every((a) => a.verification.type === 'gate')) {
+    config = { ...config, runtime: { ...config.runtime, worker_model: config.efficiency.worker_simple_model } };
+  }
   let outcome;
   try {
-    outcome = await runWorkerOnce({ task, snapshot, config, attempt });
+    outcome = await (config.efficiency?.isolate_workers ? runIsolatedWorker : runWorkerOnce)({ task, snapshot, config, attempt });
   } catch (e) {
     return { ok: false, failures: [`Worker could not be launched: ${e.message}`], launchError: e.message, transition: null };
   }
@@ -162,6 +177,10 @@ export async function stageGate({ task, run, config, rerun = false, onGateFinish
  * @returns {{ ok, refused?, errors, outcome?, report?, transition: object|null, duplicate?: object }}
  */
 export async function stageVerify({ task, run, config, rerun = false, onLaunch, dryRun = false }) {
+  if (!dryRun) {
+    const budget = checkBudget({ config, taskId: task.id });
+    if (!budget.allowed) return { ok: false, errors: budget.reasons, launchError: budget.reasons.join('; '), transition: null };
+  }
   if (isExample(task)) return { ok: false, refused: true, errors: [`${task.id} is an example task and is not verifiable.`], transition: null };
 
   const eligibility = checkVerifierEligibility({ task, run, config });
@@ -195,4 +214,3 @@ export async function stageVerify({ task, run, config, rerun = false, onLaunch, 
   task.data.status = 'DONE';
   return { ok: true, errors: [], outcome, report, transition: applied, archived };
 }
-

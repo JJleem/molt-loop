@@ -4,6 +4,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseYaml } from './yaml-lite.mjs';
 import { LOOP_DIR } from './task-store.mjs';
+import { efficiencyConfig } from './efficiency.mjs';
 
 export const PROJECT_YAML = join(LOOP_DIR, 'project.yaml');
 // 정지·에스컬레이션 정책의 유일한 출처. project.yaml에 중복해서 두지 않는다.
@@ -111,6 +112,7 @@ export function loadConfig(force = false) {
   }
 
   cached = {
+    efficiency: efficiencyConfig(runtime, existsSync(LIMITS_YAML) ? parseYaml(readFileSync(LIMITS_YAML, 'utf8')) : {}),
     project: raw.project ?? {},
     gates: raw.gates ?? {},
     limits: loadLimits(),

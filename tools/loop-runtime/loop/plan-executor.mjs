@@ -20,7 +20,11 @@ import { writeFileSync, mkdirSync, existsSync, readFileSync, readdirSync } from 
 import { join } from 'node:path';
 import { loadAllTasks, isValid, isExample, isPaused, readyTasks, checkDependencies } from '../task-store.mjs';
 import { loadPlan, planDir } from '../planner/store.mjs';
-import { executeTask } from './orchestrator.mjs';
+import { executeTask, writeClaim, releaseClaim } from './orchestrator.mjs';
+import { checkBudget, usageLedger } from '../usage-ledger.mjs';
+import { startFirstAttempt, stageWorker } from '../stages.mjs';
+import { mapLimit } from '../concurrency.mjs';
+import { checkPlanGoal } from './goal-check.mjs';
 
 export const PLAN_EXECUTIONS_DIR = 'executions';
 export const PLAN_REPORT_SCHEMA = 1;
@@ -87,6 +91,8 @@ export function selectNextPlanTask(taskIds) {
   }
 
   const readySet = new Set(readyTasks(all).map((t) => t.id));
+  const resumable = outstanding.find((t) => ['REVIEW', 'IN_PROGRESS'].includes(t.data.status) && checkDependencies(t, all).met && t.data.auto_dispatch !== false);
+  if (resumable) return { pick: resumable };
   const pick = mine.find((t) => readySet.has(t.id));
   if (pick) return { pick };
 
@@ -112,10 +118,12 @@ export async function executePlan({
   planId, taskIds, config, emit = () => {}, isInterrupted = () => false, deadlineMs = null,
 }) {
   const startedAt = new Date();
+  config = { ...config, executionPlanId: planId, executionTaskIds: taskIds };
   const executions = [];
   let result = null;
   let stopReason = null;
   let detail = null;
+  let goalCheck = null;
 
   for (;;) {
     if (isInterrupted()) {
@@ -134,6 +142,17 @@ export async function executePlan({
 
     const next = selectNextPlanTask(taskIds);
     if (next.done) {
+      if (config.efficiency?.goal_verification) {
+        emit({ event: 'goal-check', plan_id: planId });
+        let goal;
+        try { goal = await checkPlanGoal({ planId, taskIds, config }); }
+        catch (e) { goal = { result: 'FAIL', reason: e.message }; }
+        goalCheck = goal;
+        if (goal.result !== 'PASS') {
+          result = 'NEEDS_HUMAN'; stopReason = 'GOAL_CHECK_FAILED'; detail = goal.reason;
+          break;
+        }
+      }
       result = 'DONE'; stopReason = 'PLAN_COMPLETE';
       break;
     }
@@ -143,6 +162,32 @@ export async function executePlan({
     }
 
     const taskId = next.pick.id;
+    const budget = checkBudget({ config, taskId, planId, taskIds });
+    if (!budget.allowed && next.pick.data.status === 'TODO') {
+      result = 'LIMIT_REACHED'; stopReason = 'USAGE_BUDGET_EXHAUSTED'; detail = budget.reasons.join('; ');
+      break;
+    }
+    if (config.efficiency?.isolate_workers && next.pick.data.status === 'TODO') {
+      const b = config.efficiency.budget;
+      // With a financial cap, finish one paid invocation before admitting another.
+      const width = b?.plan_usd !== null && b?.plan_usd !== undefined ? 1 : config.efficiency.max_parallel_workers;
+      const ready = readyTasks(loadAllTasks()).filter((t) => taskIds.includes(t.id)).slice(0, width);
+      await mapLimit(ready, width, async (task) => {
+        if (isInterrupted() || isPaused() || (deadlineMs !== null && Date.now() > deadlineMs)) return;
+        const budget = checkBudget({ config, taskId: task.id });
+        if (!budget.allowed) return;
+        const start = startFirstAttempt({ task, config });
+        if (!start.ok) throw new Error(start.errors.join('; '));
+        emit({ event: 'task-start', task_id: task.id });
+        const beat = () => writeClaim(task.id, `ISOLATED-${start.snapshot.runId}`, { stage: 'worker', run_id: start.snapshot.runId, attempt: 1 });
+        beat();
+        const heartbeat = setInterval(beat, 15_000);
+        try {
+          const w = await stageWorker({ task, snapshot: start.snapshot, config, attempt: 1 });
+          emit({ event: 'stage', task_id: task.id, stage: 'worker', run_id: start.snapshot.runId, attempt: 1, result: w.ok ? w.transition?.to : 'failed', failures: w.failures });
+        } finally { clearInterval(heartbeat); releaseClaim(task.id); }
+      });
+    }
     emit({ event: 'task-start', task_id: taskId });
 
     // Task 하나의 루프는 전부 executeTask가 소유한다. 여기서 단계를 흉내내지 않는다.
@@ -177,6 +222,7 @@ export async function executePlan({
     result: result ?? 'FAILED',
     stopReason: stopReason ?? 'UNKNOWN',
     detail,
+    goalCheck,
     executions,
     startedAt,
     finishedAt: new Date(),
@@ -218,10 +264,12 @@ export function writePlanExecutionReport(planId, run) {
     result: run.result,
     stop_reason: run.stopReason,
     detail: run.detail,
+    goal_check: run.goalCheck ?? null,
     // 오케스트레이션 판단은 전부 결정론적이다. Plan 수준에서 LLM을 부르지 않는다.
     orchestration_llm_calls: 0,
     executions: run.executions.map(({ usage_summary, ...rest }) => rest),
     usage_summary: summarizePlanUsage(run.executions),
+    cumulative_usage: usageLedger({ taskIds: resolveExecutablePlan(planId).taskIds ?? [], planId }),
   };
   const p = join(dir, `${id}.json`);
   writeFileSync(p, `${JSON.stringify(report, null, 2)}\n`, 'utf8');

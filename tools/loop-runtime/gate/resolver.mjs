@@ -8,7 +8,7 @@ import { statSync } from 'node:fs';
 import { resolve, relative, sep } from 'node:path';
 import { ROOT } from '../task-store.mjs';
 
-const GATE_KEYS = new Set(['enabled', 'command', 'reason', 'timeout_seconds', 'cwd']);
+const GATE_KEYS = new Set(['enabled', 'command', 'reason', 'timeout_seconds', 'cwd', 'parallel_safe']);
 // Gate 이름은 Run 디렉터리 이름이 된다. 경로 조작이 불가능한 문자만 허용한다.
 const GATE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
@@ -86,6 +86,7 @@ export function loadGateConfig(config) {
     }
 
     gates[name] = {
+      parallel_safe: body.parallel_safe === true,
       name,
       enabled,
       command: isNonEmptyString(command) ? command.trim() : null,
@@ -93,6 +94,7 @@ export function loadGateConfig(config) {
       timeout_seconds: timeoutSeconds,
       cwd,
     };
+    if (body.parallel_safe !== undefined && typeof body.parallel_safe !== 'boolean') errors.push(`${at}.parallel_safe must be boolean`);
   }
 
   return { gates, names: Object.keys(gates), errors };

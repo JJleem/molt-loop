@@ -2,6 +2,17 @@
 
 This file defines how the interactive Claude session should operate inside projects that use the Loop Runtime.
 
+Current command/settings reference: `docs/RUNTIME-USAGE.md`.
+Existing commands retain their approval boundaries. When the user has authorized
+specific goal files, `loopctl start --file <phase> [--file <next-phase>]` records
+that scope and connects planning, approval, and execution. Do not ask again for
+an already authorized phase. New product decisions still need the user's input.
+`resume <RUN|TASK|PLAN>` reuses completed stages; `usage --all` reports cumulative
+cost and stage time. Configured isolated workers can run concurrently; only the
+Runtime integrates their results and performs final checks. Historical statements
+below about strictly sequential workers describe the default compatibility mode.
+Search field notes for relevant observations instead of reading their full history.
+
 It is a local operator guide.
 
 It must not replace the Product Spec, Phase Goal, Runtime Task contract, Gate, or Verifier.

@@ -27,7 +27,7 @@ Before doing anything else, inspect and understand the following files if they e
 - `prompts/PROJECT-BOOTSTRAP.md`
 - `docs/SYSTEM-MAP.md` — the project's high-level map, if this repository already has one
 - `docs/SYSTEM-MAP.template.md` — the template it is created from
-- `docs/LOOP-RUNTIME-FIELD-NOTES.md`
+- `docs/RUNTIME-USAGE.md` — current commands and settings
 - `.loop/KERNEL.md`
 - `.loop/project.yaml`
 
@@ -36,6 +36,9 @@ Also confirm that the reusable Runtime exists:
 - `tools/loop-runtime/`
 - `loopctl`
 - `loopctl.cmd`
+
+Do not load the full historical `docs/LOOP-RUNTIME-FIELD-NOTES.md` at startup.
+Search it only for observations relevant to an actual failure or a design question.
 
 Do not modify Runtime source code during initial project setup unless the Runtime itself is broken.
 
@@ -78,6 +81,12 @@ Initialize the project in this exact high-level order:
 ```
 
 Do not begin Phase implementation before planning and Bootstrap are complete.
+
+If the user has authorized implementation of specific Phase files, use
+`loopctl start --file phase-prompt/01-*.md` with the actual filename (no glob),
+and additional `--file` arguments for explicitly authorized following phases.
+This records the supplied scope and resumes it on repetition. Existing
+`plan` / `plan-approve` / `execute-plan` commands remain available unchanged.
 
 ---
 

@@ -35,6 +35,9 @@ export const PLANNER_DENY = ['Edit', 'Write', 'NotebookEdit', 'Bash', 'WebFetch'
  * @returns {{ planId, dir, snapshot, envelope, validation, report }}
  */
 export async function runPlannerOnce({ goal, goalSource = 'argument', config, onLaunch, now = new Date() }) {
+  const { assertBudget } = await import('../usage-ledger.mjs');
+  assertBudget(config);
+  if (config.efficiency?.budget.plan_usd === 0) throw new Error('PLAN_BUDGET reached: planning is disabled by a zero plan budget');
   const adapterName = config.runtime.planner_adapter;
   const adapter = getAdapter(adapterName);
   const availability = await adapter.detect();
@@ -68,6 +71,7 @@ export async function runPlannerOnce({ goal, goalSource = 'argument', config, on
   onLaunch?.({ adapter: adapterName, version: availability.version ?? null, planId });
 
   const startedAt = new Date();
+  writeFileSync(join(dir, 'planner-started.json'), JSON.stringify({ started_at: startedAt.toISOString(), plan_id: planId }));
   const proc = await adapter.runPlanner({
     planId,
     goal,

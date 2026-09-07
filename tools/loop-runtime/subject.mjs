@@ -129,3 +129,19 @@ export function subjectRef(subject) {
 export function sameSubject(a, b) {
   return Boolean(a?.sha256) && Boolean(b?.sha256) && a.sha256 === b.sha256;
 }
+
+/** Missing historical entries are unknown, never interpreted as an empty tree. */
+export function diffSubjects(before, after) {
+  if (!Array.isArray(before?.entries) || !Array.isArray(after?.entries) || !before.sha256 || !after.sha256) return { known: false, changes: [], head_changed: before?.head !== after?.head };
+  const a = new Map(before.entries.map((e) => [e.path, e]));
+  const b = new Map(after.entries.map((e) => [e.path, e]));
+  const changes = [];
+  for (const path of [...new Set([...a.keys(), ...b.keys()])].sort()) {
+    const x = a.get(path), y = b.get(path);
+    // entries contain dirty files, not a full tree: a newly dirty tracked file is a modification.
+    if (!x) changes.push({ path, kind: y.code?.includes('D') ? 'REMOVED' : y.code === '??' || y.code?.includes('A') ? 'ADDED' : 'CHANGED' });
+    else if (!y) changes.push({ path, kind: x.code === '??' || x.code?.includes('A') ? 'REMOVED' : 'CHANGED' });
+    else if (x.sha256 !== y.sha256 || x.code !== y.code) changes.push({ path, kind: y.code?.includes('D') ? 'REMOVED' : 'CHANGED' });
+  }
+  return { known: true, changes, head_changed: before.head !== after.head };
+}

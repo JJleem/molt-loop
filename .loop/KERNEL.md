@@ -19,7 +19,7 @@
 
 - `status:` 필드를 편집하지 않는다. DONE으로 바꾸는 것은 절대 금지다.
 - `acceptance_criteria`, `stop_condition`, `evidence`, `failure_memo`를 직접 수정하지 않는다.
-- 종료는 Gate와 Verifier가 결정한다. Worker는 완료를 선언할 수 없다.
+- 종료는 Runtime이 Gate와 필요한 독립 검증에 근거해 결정한다. Worker는 완료를 선언할 수 없다.
 
 ## 4. 지정된 Task 범위만 수행한다
 
@@ -63,7 +63,7 @@ Run 종료 시 반드시 아래 형식의 JSON을 반환한다. 산문 요약으
 {
   "run_id": "RUN-...",
   "task_id": "TASK-...",
-  "outcome": "success | failure | blocked",
+  "outcome": "success | failed | blocked",
   "summary": "한 줄",
   "changed_files": ["src/..."],
   "evidence": [

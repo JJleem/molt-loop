@@ -137,6 +137,8 @@ export function checkVerifierEligibility({ task, run, config }) {
  * Task 상태는 건드리지 않는다. 판단에 필요한 사실만 돌려준다.
  */
 export async function runVerifierOnce({ task, run, config, eligibility, onLaunch }) {
+  const { assertBudget } = await import('../usage-ledger.mjs');
+  assertBudget(config, task.id);
   const adapterName = config.runtime.verifier_adapter;
   const adapter = getAdapter(adapterName);
   const availability = await adapter.detect();
@@ -161,6 +163,7 @@ export async function runVerifierOnce({ task, run, config, eligibility, onLaunch
   onLaunch?.({ adapter: adapterName, version: availability.version ?? null });
 
   const startedAt = new Date();
+  writeFileSync(join(verificationDir, 'verifier-started.json'), JSON.stringify({ started_at: startedAt.toISOString(), task_id: task.id, run_id: run.runId }));
   const proc = await adapter.runVerifier({
     runId: run.runId,
     taskId: task.id,

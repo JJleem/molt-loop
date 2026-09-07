@@ -14,10 +14,18 @@
 2. **구현** — Acceptance Criteria를 충족하는 최소 변경을 만든다. 주변 코드의 스타일을 따른다.
 3. **테스트** — 각 Acceptance Criteria가 어떤 검사로 판정되는지 대응시킨다.
    판정 수단이 없는 AC는 테스트를 새로 작성한다.
-4. **실행** — `.loop/project.yaml`에 정의된 Gate 명령을 로컬에서 직접 실행하고 결과를 확인한다.
+4. **실행** — `node tools/loop-runtime/loopctl.mjs self-check [<gate> ...]`로 검사한다.
+   `npm test` 같은 명령을 직접 시도하지 않는다. 실패하면 관련 코드를 고친 뒤 실패한 검사부터 다시 실행한다.
    (Gate가 `enabled: false`면 실행하지 않고 Result의 `notes`에 그 사실을 적는다.)
 5. **Evidence 생성** — 실행 출력·exit code·변경 파일 목록을 `.loop/evidence/<TASK-ID>/` 에 파일로 남긴다.
 6. **Result 반환** — KERNEL 7절의 JSON 형식. 성공했다고 판단해도 `requested_transition`은 `REVIEW`다.
+
+## 탐색과 출력 비용
+
+- TASK RESOURCES의 파일과 진입점부터 읽는다. 부족할 때만 관련 import와 호출자로 탐색을 넓힌다.
+- 동일한 파일·거부된 명령을 이유 없이 반복해서 읽거나 실행하지 않는다.
+- 기존 검사로 판정 가능한 AC에는 중복 테스트를 만들지 않는다.
+- Result summary는 한 줄, notes는 미해결 사항 중심으로 짧게 쓴다. 코드로 확인할 사실을 긴 산문으로 재증명하지 않는다.
 
 ## 하지 않는 일 (금지)
 
