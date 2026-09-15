@@ -1,12 +1,42 @@
 # molt-loop — Loop Runtime Starter Pack
 
 AI Worker에게 프로젝트를 맡기되, **완료 판정은 AI에게 맡기지 않는** 실행 런타임.
+새 프로젝트에 복사해서 쓰는 Starter Pack이며, 제품 코드는 들어 있지 않다.
 
-목표 하나를 주면 Task로 쪼개고, Worker를 돌리고, 결정론적 Gate와 독립 Verifier로 검증하고,
-실패하면 진단해서 재시도하고, 그래도 안 되면 읽기 전용 Triage가 먼저 보고, 정말 사람이 필요한
-지점에서만 멈춘다. 그 전 과정이 파일로 남는다.
+## 한눈에 보기
 
-이 저장소는 **새 프로젝트에 복사해서 쓰는 Starter Pack**이다. 제품 코드는 들어 있지 않다.
+- **하는 일.** 목표 파일 하나를 주면 Task로 쪼개고, AI Worker가 구현하고, build·lint·test와 독립 Verifier가
+  판정하고, 실패하면 진단해서 재시도한다. 그래도 안 되면 읽기 전용 Triage가 먼저 보고, 정말 사람이
+  필요한 지점에서만 멈춘다. 전 과정이 파일로 남는다.
+- **다른 점.** "다 했습니다"라는 AI의 말은 근거가 아니다. Runtime이 직접 실행한 명령의 exit code와
+  구현자를 모르는 별도 AI의 판정만이 DONE을 만든다.
+- **필요한 것.** Node.js 22+ 와 Claude Code CLI. `npm install`도 `package.json`도 없다.
+- **사람이 하는 것.** 처음에 스펙과 Phase 목표를 쓰고, 끝에 결과를 인수한다. 그 사이는 명령 한 줄과 `status`다.
+
+## 빠르게 시작하기
+
+```bash
+# 1. 복사
+git clone https://github.com/JJleem/molt-loop.git my-project && cd my-project
+rm -rf .git && git init
+./loopctl doctor                 # exit 0이면 준비 끝. Gate 3개가 disabled인 건 정상이다
+
+# 2. 첫 세션 — 대화형 Claude를 열고 START-HERE.md를 첫 프롬프트로 준 뒤, 만들 것을 한 줄로 말한다
+#    예) 내가 만들고 싶은 건 "CSV 가계부 파일을 올리면 월별 지출 리포트를 보여주는 웹 앱"이야. 처음부터 시작해줘.
+#    → 그 세션이 docs/PRODUCT-SPEC.md · phase-prompt/01-*.md · 개발 환경 · Gate를 만들고 멈춘다
+
+# 3. Phase 하나 돌리기 — 이 한 줄이 계획 → 승인 → 실행을 끝까지 잇는다
+./loopctl start --file phase-prompt/01-foundation.md
+
+# 4. 어디까지 됐는지 + 다음에 칠 명령
+./loopctl status
+```
+
+멈추면 같은 `start` 명령을 다시 치면 남은 곳부터 이어간다.
+빠르게 가야 하면 `./loopctl quick "README에 설치 절차를 추가한다"` — 같은 흐름에 낮은 effort 프로필을 적용한다.
+5분짜리 요약은 [docs/QUICKSTART.md](docs/QUICKSTART.md)에 있다.
+
+## 전체 흐름
 
 ```mermaid
 flowchart TD
@@ -29,21 +59,9 @@ flowchart TD
 
 ---
 
-## 30초 요약
-
-```bash
-./loopctl doctor                                      # 준비됐는지 (AI 호출 없음)
-./loopctl start --file phase-prompt/01-foundation.md  # 계획 → 승인 → 실행, 끝까지
-./loopctl status                                      # 어디까지 됐고, 다음에 뭘 칠지 (NEXT)
-```
-
-빠르게 가야 하면 `./loopctl quick "README에 설치 절차를 추가한다"`.
-멈추면 같은 명령을 다시 치면 이어서 간다. 그게 전부다.
-
----
-
 ## 목차
 
+- [한눈에 보기](#한눈에-보기) · [빠르게 시작하기](#빠르게-시작하기) · [전체 흐름](#전체-흐름)
 - [무엇이 다른가](#무엇이-다른가)
 - [설치](#설치)
 - [처음 쓰는 법 — 새 프로젝트 시작](#처음-쓰는-법--새-프로젝트-시작)
