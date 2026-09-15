@@ -9,21 +9,23 @@ AI Worker에게 프로젝트를 맡기되, **완료 판정은 AI에게 맡기지
 이 저장소는 **새 프로젝트에 복사해서 쓰는 Starter Pack**이다. 제품 코드는 들어 있지 않다.
 
 ```mermaid
-flowchart LR
-    G([Goal 파일]) --> P[Planner<br/>읽기 전용 AI]
-    P --> A{사람 승인<br/>start/quick은<br/>명령 자체가 승인}
-    A --> T[Task 파일 생성]
-    T --> W[Worker<br/>AI가 코드 작성]
-    W --> GT[Gate<br/>build · lint · test<br/>AI 없음]
-    GT --> V[Verifier<br/>독립 AI, 읽기 전용]
+flowchart TD
+    G([Goal 파일]) --> P[Planner가 Task 제안]
+    P --> A[승인 → Task 파일]
+    A --> W[Worker가 코드 작성]
+    W --> GT[Gate: build · lint · test]
+    GT --> V[Verifier가 독립 판정]
     V -->|PASS| D([DONE])
-    GT -->|FAIL| DG[Diagnose<br/>결정론적]
-    V -->|FAIL| DG
-    DG -->|lesson 1줄 주입| W
-    DG -->|한도 초과| TR[Triage<br/>읽기 전용 AI<br/>메뉴에서만 선택]
-    TR -->|재실행 · 재시도 · 재계획| W
-    TR -->|ESCALATE| H([사람])
+    GT -->|FAIL| R[진단 후 재시도]
+    V -->|FAIL| R
+    R --> W
+    R -->|한도 초과| T[Triage가 먼저 본다]
+    T -->|풀 수 있으면| W
+    T -->|아니면| H([사람])
 ```
+
+역할은 넷이다. **Planner**(계획) · **Worker**(구현) · **Verifier**(판정) · **Triage**(정지 처리).
+전부 서로 다른 AI 호출이고 대화를 공유하지 않는다. 완료를 결정하는 것은 이 중 누구도 아닌 **Runtime**이다.
 
 ---
 
@@ -118,24 +120,45 @@ Windows는 `.\loopctl`을 쓴다. 진입점은 인자를 그대로 넘기고 exi
 
 ## 처음 쓰는 법 — 새 프로젝트 시작
 
-복사한 직후 **대화형 Claude 세션을 열고 `START-HERE.md`를 첫 프롬프트로 준다.**
-그 문서가 아래 순서를 진행시킨다. 여기까지는 Runtime이 아니라 대화형 세션의 일이다.
+복사한 직후 **대화형 Claude 세션을 열고 `START-HERE.md`를 첫 프롬프트로 준 뒤, 만들고 싶은 것을 한 줄로 말한다.**
+예를 들면 이렇게.
+
+```text
+내가 만들고 싶은 건
+"CSV 가계부 파일을 올리면 월별 지출 리포트를 보여주는 웹 앱"이야.
+처음부터 시작해줘.
+```
+
+또는:
+
+```text
+프로젝트 주제:
+"회사 위키 문서를 로컬에서 검색하고 요약하는 CLI 도구"
+
+시작해줘.
+```
+
+여기까지는 Runtime이 아니라 대화형 세션의 일이다. 그 세션이 세 단계를 진행하고 Phase 1 직전에 멈춘다.
 
 ```mermaid
 flowchart TD
-    S(["주제 한 줄<br/>로컬 3D 파일 변환 호환성 비교 도구"]) --> P1[Step 1 · Product Spec + Phase 로드맵<br/>prompts/PROJECT-PHASE-PLANNER.md]
-    P1 --> F1[docs/PRODUCT-SPEC.md<br/>phase-prompt/01-*.md … Goal.md]
-    F1 --> R{Step 2 · 사람이 읽는다<br/>Phase 분할이 말이 되는가}
+    S([주제 한 줄]) --> P1[1. 스펙과 Phase 로드맵 작성]
+    P1 --> R[2. 사람이 로드맵을 읽는다]
     R -->|고칠 게 있으면| P1
-    R -->|OK| B[Step 3 · Bootstrap<br/>prompts/PROJECT-BOOTSTRAP.md]
-    B --> F2[스택 · scaffold · build/lint/test<br/>.loop/project.yaml Gate 활성화<br/>docs/SYSTEM-MAP.md]
-    F2 --> C[loopctl doctor PASS]
-    C --> STOP([여기서 멈춘다<br/>Phase 1은 사람이 시작한다])
+    R -->|OK| B[3. Bootstrap: 스택 · Gate 준비]
+    B --> C([doctor PASS — 여기서 멈춘다])
 ```
+
+| 단계 | 쓰는 프롬프트 | 만들어지는 것 |
+| --- | --- | --- |
+| 1 | `prompts/PROJECT-PHASE-PLANNER.md` | `docs/PRODUCT-SPEC.md`, `phase-prompt/01-*.md … Goal.md` |
+| 2 | (사람) | 로드맵 검토 |
+| 3 | `prompts/PROJECT-BOOTSTRAP.md` | 스택 scaffold, build/lint/test, `.loop/project.yaml` Gate, `docs/SYSTEM-MAP.md` |
 
 **Step 1 — 무엇을 만들 것인가.** 주제를 말하면 `PROJECT-PHASE-PLANNER.md`가
 `docs/PRODUCT-SPEC.md`(이후 모든 것의 source of truth)와 `phase-prompt/01-*.md … Goal.md`를 만든다.
-**계획만 한다.** Task도 코드도 만들지 않는다.
+**계획만 한다.** Task도 코드도 만들지 않는다. 위 가계부 예시라면 Phase는 대략
+"CSV 파싱과 월별 집계 → 리포트 화면 → 파일 업로드와 저장 → 마무리" 정도로 나뉜다.
 
 **Step 2 — 사람이 읽는다.** Phase 분할이 말이 되는지 본다. 여기서 잘못되면 뒤가 전부 잘못된다.
 이 문서들은 나중에 Triage가 질문에 답할 때 보는 근거이기도 하다. 스펙이 애매하면 Runtime도 애매하게 간다.
@@ -233,38 +256,25 @@ Task마다 갱신하지 않는다. 규칙은 `CLAUDE.local.md`에 있다.
 
 `execute-plan`이 Task 하나에 대해 하는 일이다. 오케스트레이션 판단은 전부 결정론적이며 AI를 부르지 않는다.
 
+성공하는 경우의 순서다.
+
 ```mermaid
 sequenceDiagram
-    autonumber
     participant R as Runtime
-    participant W as Worker (AI)
-    participant G as Gate (subprocess)
-    participant V as Verifier (AI, 읽기 전용)
-    participant T as Triage (AI, 읽기 전용)
-
-    R->>R: TODO → IN_PROGRESS, Run snapshot 작성<br/>(KERNEL · Role · Task · AC · Failure Memo)
-    R->>W: context.md + 결과 규약
-    W-->>R: worker-result.json (요청: REVIEW)
-    R->>R: 보호 파일 지문 대조, 결과 검증<br/>IN_PROGRESS → REVIEW
+    participant W as Worker
+    participant G as Gate
+    participant V as Verifier
+    R->>W: Task · 기준 · 이전 실패의 lesson
+    W-->>R: 코드 변경 + 결과 파일
     R->>G: build · lint · test 실행
-    G-->>R: exit code + 로그 → gate-report.json
-    alt Gate PASS
-        R->>V: canonical diff + Gate 결과 + Runtime Facts<br/>(Worker 요약은 넣지 않는다)
-        V-->>R: AC별 판정 + evidence_basis
-        alt Verifier PASS
-            R->>R: REVIEW → DONE
-        else Verifier FAIL
-            R->>R: Diagnose → Failure Memo → Retry (한도 안에서)
-        end
-    else Gate FAIL
-        R->>R: Diagnose → Failure Memo → Retry (한도 안에서)
-    end
-    opt 한도 초과 · 모호한 정지 · BLOCKED
-        R->>T: 정지 사유 + 진단 + 기록 + 메뉴
-        T-->>R: 메뉴 중 하나 (DONE은 없다)
-        R->>R: 결정 실행 또는 ESCALATE → 사람
-    end
+    G-->>R: exit code + 로그
+    R->>V: 변경 diff + Gate 결과 (Worker 요약은 없음)
+    V-->>R: 기준별 PASS/FAIL + 근거
+    R->>R: 전부 PASS면 DONE
 ```
+
+실패하면 Runtime이 실패를 분류하고(AI 없음) lesson 한 줄을 만들어 Worker를 다시 부른다.
+한도를 넘기거나 애매한 정지가 나면 Triage가 본다. 그 부분은 [다음 절](#멈췄을-때-무슨-일이-일어나는가--triage)에 있다.
 
 Task 상태는 여섯 개뿐이고 전이는 표에 있는 것만 존재한다. Runtime만 쓴다.
 
@@ -272,15 +282,12 @@ Task 상태는 여섯 개뿐이고 전이는 표에 있는 것만 존재한다. 
 stateDiagram-v2
     [*] --> TODO
     TODO --> IN_PROGRESS : Worker 시작
-    IN_PROGRESS --> REVIEW : Worker가 요청 · Runtime이 검증 후 적용
-    IN_PROGRESS --> BLOCKED : Worker가 막힘을 보고
-    IN_PROGRESS --> TODO : 재시도 준비
-    REVIEW --> DONE : Gate PASS + Verifier PASS
-    REVIEW --> IN_PROGRESS : Gate/Verifier FAIL → 재시도
-    REVIEW --> BLOCKED
-    BLOCKED --> TODO : 사람 또는 Triage UNBLOCK
-    BLOCKED --> DROPPED : 사람 또는 Triage REPLAN
-    TODO --> DROPPED
+    IN_PROGRESS --> REVIEW : Worker 완료
+    IN_PROGRESS --> BLOCKED : Worker가 막힘
+    REVIEW --> DONE : Gate + Verifier PASS
+    REVIEW --> IN_PROGRESS : FAIL → 재시도
+    BLOCKED --> TODO : 풀림
+    BLOCKED --> DROPPED : 재계획으로 대체
     DONE --> [*]
     DROPPED --> [*]
 ```
@@ -297,21 +304,16 @@ Gate 도는 동안 사람이 메모 파일 하나 만들었다고 $2.75짜리 Ru
 
 ```mermaid
 flowchart TD
-    S([정지 발생]) --> K{어떤 정지인가}
-    K -->|정책 위반 · 예산 소진 · PAUSE<br/>보안/비가역/제품 갈림길 질문| H([사람<br/>AI를 부르지도 않는다])
-    K -->|검증 중 저장소 변경<br/>Gate timeout| M1[메뉴: RERUN_GATES · ESCALATE]
-    K -->|Verifier 자체 사고| M2[메뉴: RERUN_VERIFIER · ESCALATE]
-    K -->|재시도 한도 · 같은 실패 반복| M3[메뉴: RETRY_WITH_LESSON · REPLAN · ESCALATE]
-    K -->|Worker BLOCKED| M4[메뉴: UNBLOCK · REPLAN · ESCALATE]
-    K -->|Goal 검증 실패| M5[메뉴: REPLAN · ESCALATE]
-    K -->|Planner 질문이 spec/implementation 분류뿐| M6[메뉴: ANSWER · ESCALATE]
-    M1 & M2 & M3 & M4 & M5 & M6 --> T[Triage<br/>읽기 전용 AI<br/>기록 + 스펙만 본다]
-    T --> C{근거 경로가 실제로 있고<br/>결정이 메뉴 안인가}
-    C -->|아니오| H
-    C -->|예| X[Runtime이 결정 실행<br/>사람이 CLI로 하는 것과 같은 단계]
+    S([정지 발생]) --> K{자동화해도 되는 종류인가}
+    K -->|아니오: 정책 위반 · 예산 · 보안 결정| H([사람])
+    K -->|예| T[Triage가 기록과 스펙을 읽는다]
+    T --> M{메뉴 안의 결정 + 실제 근거가 있는가}
+    M -->|예| X[Runtime이 실행: 재검사 · 재시도 · 재계획]
+    M -->|아니오 또는 ESCALATE| H
     X --> L([루프 계속])
-    T -->|ESCALATE| H
 ```
+
+어떤 정지에 어떤 메뉴가 나오는지는 아래 표에 있다.
 
 **Triage가 할 수 있는 것.** Runtime이 정지 사유별로 만든 메뉴에서 하나를 고른다. 메뉴는 사람이
 `resume` · `retry` · `gate --rerun` · `verify --rerun`으로 할 수 있는 복구 행동과 같다.

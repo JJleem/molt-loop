@@ -376,7 +376,7 @@ The user should only need to say something like:
 
 ```text
 내가 만들고 싶은 건
-"로컬에서 여러 3D 파일을 분석하고 변환 호환성을 비교하는 웹 도구"야.
+"CSV 가계부 파일을 올리면 월별 지출 리포트를 보여주는 웹 앱"이야.
 처음부터 시작해줘.
 ```
 
