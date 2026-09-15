@@ -1,7 +1,7 @@
 # V0 정지·에스컬레이션 정책 (Runtime이 강제한다. Worker는 읽지도 수정하지도 않는다.)
 
 stop:
-  max_attempts: 3
+  max_attempts: 4
   max_consecutive_failures: 2
 
 stall:
@@ -12,8 +12,19 @@ stall:
 
 escalation:
   retry_max: 1          # transient 실패만
-  hint_retry_max: 1     # failure_memo의 lesson을 Context에 주입한 재시도
-  then: needs-human     # V0에서는 replan/decompose 자동화 없음 - 사람에게 올린다
+  hint_retry_max: 2     # failure_memo의 lesson을 Context에 주입한 재시도
+  then: needs-human     # 사다리가 끝나면 사람 — 단, 아래 triage가 켜져 있으면 Triage가 먼저 본다
+
+# Triage — 사람을 부르기 직전에 먼저 보는 판단 역할 (V0.4). 기본으로 켜져 있다.
+# Runtime이 준 메뉴(RERUN_GATES · RERUN_VERIFIER · RETRY_WITH_LESSON · UNBLOCK · REPLAN · ANSWER · ESCALATE)에서만
+# 고르고, DONE은 메뉴에 없다. 정책 위반 · 예산 · 보안/비가역 질문은 메뉴에 오지 않는다.
+# 아래 숫자는 "판단 예산"이며 위 사다리와 별개로 센다. 섹션을 지우면 이전처럼 곧바로 사람에게 간다.
+triage:
+  enabled: true
+  max_decisions_per_task: 2   # Task당 Triage AI 호출 수
+  max_retries_per_task: 1     # 그중 RETRY_WITH_LESSON 횟수
+  max_replans_per_plan: 1     # Phase(Plan)당 REPLAN 횟수. start/quick 아래에서만 실행된다
+  max_answers_per_plan: 1     # Phase당 Planner 질문 자동 답변 횟수
 
 planning:
   # 하나의 Plan이 제안할 수 있는 최대 Task 수. 초과하면 Plan 검증이 실패한다 —

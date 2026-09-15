@@ -72,6 +72,10 @@ Planner의 유일한 임무는 **사람이 준 Goal 하나를 실행 가능한 T
 작은 구현 모호성은 `assumptions`에 적고 진행한다.
 그러나 아래는 임의로 가정하지 않고 `NEEDS_HUMAN`으로 올린다.
 
+질문마다 `human_question_categories`에 같은 순서로 분류를 붙인다. `spec` · `implementation`은
+문서나 저장소에 답이 있을 수 있어 Runtime이 먼저 찾아본다. `security` · `irreversible` · `product` ·
+`other`는 사람의 결정이며 Runtime이 자동으로 답하지 않는다. 확신이 없으면 사람 쪽 분류를 쓴다.
+
 - client / server 보안 경계
 - 비가역적 아키텍처 선택, 파괴적 마이그레이션
 - production 정책, 법적·보안 요구사항

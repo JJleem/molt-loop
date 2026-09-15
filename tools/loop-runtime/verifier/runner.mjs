@@ -175,6 +175,8 @@ export async function runVerifierOnce({ task, run, config, eligibility, onLaunch
     cwd: ROOT,
     timeoutMs: timeoutSeconds * 1000,
     model: config.runtime.verifier_model,
+    effort: config.runtime.verifier_effort ?? null,
+    maxBudgetUsd: config.runtime.max_call_budget_usd ?? null,
     schema: verifierResultSchema(),
     tools: VERIFIER_TOOLS,
     deny: VERIFIER_DENY,
@@ -252,6 +254,9 @@ export async function runVerifierOnce({ task, run, config, eligibility, onLaunch
     adapter: adapterName,
     adapter_version: availability.version ?? null,
     model: proc.model ?? null,
+    effort_requested: config.runtime.verifier_effort ?? null,
+    max_call_budget_usd: config.runtime.max_call_budget_usd ?? null,
+    profile: config.profile ?? null,
     attempt: priorVerificationAttempts(verificationDir) + 1,
 
     started_at: startedAt.toISOString(),

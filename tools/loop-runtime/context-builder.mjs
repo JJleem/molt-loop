@@ -14,6 +14,7 @@ import { join, relative } from 'node:path';
 import { ROOT, LOCAL_DIR, KERNEL_PATH, SKILLS_DIR } from './task-store.mjs';
 import { buildTaskResources } from './task-resources.mjs';
 import { loadConfig } from './config.mjs';
+import { readClarification } from './recovery/triage.mjs';
 
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 const rel = (p) => relative(ROOT, p).split('\\').join('/');
@@ -104,12 +105,19 @@ export function buildContext(task, { failureMemos = [] } = {}) {
   }
   const memo = parts.length === 0 ? '(none — 첫 시도다.)' : parts.join('\n\n----\n\n');
 
+  // Triage가 BLOCKED를 풀며 남긴 설명. Runtime 기록이지 이전 Worker의 대화가 아니다.
+  const clarification = readClarification(task.id);
+  const clarificationText = clarification?.notes?.length
+    ? clarification.notes.map((n) => `${n.lesson}${n.evidence_refs?.length ? `\n  (evidence: ${n.evidence_refs.join(', ')})` : ''}`).join('\n\n')
+    : null;
+
   const context = [
     section('KERNEL', kernel),
     section('ROLE', skill),
     section('TASK', taskLines.join('\n')),
     section('ACCEPTANCE CRITERIA', ac),
     section('FAILURE MEMO', memo),
+    ...(clarificationText ? [section('TRIAGE CLARIFICATION', clarificationText)] : []),
     ...(loadConfig().efficiency.task_resources ? [section('TASK RESOURCES', buildTaskResources(task))] : []),
   ].join('\n');
 

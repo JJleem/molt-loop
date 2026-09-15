@@ -14,6 +14,9 @@ import { getDiagnosis, readDiagnosis, RETRYABLE_ACTIONS } from './diagnose.mjs';
 import { getFailureMemo, readFailureMemo } from './failure-memo.mjs';
 import { checkRetryBudget, attemptHistory } from './limits.mjs';
 
+/** Triage가 lesson을 붙여 재시도할 수 있는 실패 종류. 정책·권한·환경 문제는 없다. */
+const TRIAGE_RETRYABLE = ['GATE_FAILURE', 'VERIFY_FAILED', 'TIMEOUT', 'SCHEMA_FAILURE', 'PROCESS_CRASH'];
+
 /**
  * 실패한 Run 하나에 대한 진단 + Memo. diagnose 명령과 retry가 같은 경로를 쓴다.
  * (진단 로직을 두 곳에 복제하지 않는다.)
@@ -49,10 +52,12 @@ export function collectMemoChain(taskId, sourceRunId) {
  * 유료 Worker를 다시 띄우기 전 preflight. 하나라도 걸리면 AI를 호출하지 않는다.
  * @returns {{ ok: boolean, errors: string[], assessment, nextAttempt, memos }}
  */
-export function checkRetryEligibility({ task, run, config, subject = null }) {
+export function checkRetryEligibility({ task, run, config, subject = null, triage = null }) {
   const errors = [];
   const assessment = assess({ task, run, config, subject });
-  const { diagnosis, budget } = assessment;
+  const { diagnosis } = assessment;
+  // Triage가 lesson을 준 재시도는 사다리 예산 대신 triage 예산을 쓴다. 안전 검사(subject drift 등)는 그대로다.
+  const budget = triage ? checkRetryBudget({ task, config, action: 'RETRY_WITH_TRIAGE' }) : assessment.budget;
 
   if (isPaused()) errors.push('PAUSE is active. Remove .loop-local/PAUSE to run workers.');
   if (isExample(task)) errors.push(`${task.id} is the example task and is never dispatched.`);
@@ -70,9 +75,12 @@ export function checkRetryEligibility({ task, run, config, subject = null }) {
   const drifted = downgraded && Boolean(sc?.bound_to) && sc.matches === false;
   const unknownSubject = downgraded && Boolean(sc) && !sc.bound_to;
 
+  const triageRetryable = triage && TRIAGE_RETRYABLE.includes(diagnosis.failure_class) && !(diagnosis.stage === 'verifier' && diagnosis.failure_class !== 'VERIFY_FAILED');
   if (diagnosis.failure_class === null) {
     errors.push(`${run.runId} has no recorded failure — there is nothing to retry.`);
-  } else if (!downgraded && !RETRYABLE_ACTIONS.includes(diagnosis.recommended_action)) {
+  } else if (triage && !triageRetryable) {
+    errors.push(`latest failure is ${diagnosis.failure_class} at stage ${diagnosis.stage}; triage may not retry it.`);
+  } else if (!downgraded && !triage && !RETRYABLE_ACTIONS.includes(diagnosis.recommended_action)) {
     // 실패 자체가 재시도 대상이 아니다 (policy violation · gate ERROR · verifier 사고 ...).
     // 저장소 상태보다 이쪽이 더 강한 차단 사유이므로 먼저 보고한다.
     errors.push(`latest failure is ${diagnosis.failure_class}, recommended action ${diagnosis.recommended_action}.`);
@@ -84,12 +92,12 @@ export function checkRetryEligibility({ task, run, config, subject = null }) {
   } else if (unknownSubject) {
     errors.push(`the runtime cannot prove which repository state ${run.runId} left behind.`);
     errors.push('  this run predates verification-subject recording; another worker attempt is not provably safe.');
-  } else if (!RETRYABLE_ACTIONS.includes(diagnosis.recommended_action)) {
+  } else if (!triage && !RETRYABLE_ACTIONS.includes(diagnosis.recommended_action)) {
     errors.push(`latest failure is ${diagnosis.failure_class}, recommended action ${diagnosis.recommended_action}.`);
     errors.push(`  ${diagnosis.reason}`);
   }
 
-  if (!assessment.memo && RETRYABLE_ACTIONS.includes(diagnosis.recommended_action)
+  if (!triage && !assessment.memo && RETRYABLE_ACTIONS.includes(diagnosis.recommended_action)
       && diagnosis.recommended_action === 'RETRY_WITH_HINT') {
     errors.push(`no failure memo could be distilled (${assessment.memoReason ?? 'unknown'}).`);
   }
@@ -117,7 +125,7 @@ export function checkRetryEligibility({ task, run, config, subject = null }) {
  * 재시도 Attempt의 Snapshot을 만든다. lineage와 증류된 Memo만 넘긴다.
  * Worker 실행 자체는 기존 worker/runner를 그대로 쓴다 — retry 전용 adapter는 만들지 않는다.
  */
-export function writeRetrySnapshot({ task, sourceRun, diagnosis, memos, attempt }) {
+export function writeRetrySnapshot({ task, sourceRun, diagnosis, memos, attempt, retryAction = null }) {
   const history = attemptHistory(task.id);
   const sourceEntry = history.find((h) => h.runId === sourceRun.runId);
   const rootRunId = sourceEntry?.lineage?.root_run_id ?? sourceRun.runId;
@@ -129,7 +137,7 @@ export function writeRetrySnapshot({ task, sourceRun, diagnosis, memos, attempt 
       root_run_id: rootRunId,
       parent_run_id: sourceRun.runId,
       retry_reason: diagnosis.failure_class,
-      retry_action: diagnosis.recommended_action,
+      retry_action: retryAction ?? diagnosis.recommended_action,
       parent_failure_fingerprint: diagnosis.failure_fingerprint,
       failure_memo: `${sourceRun.runId}/recovery/failure-memo.json`,
     },

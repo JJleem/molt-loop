@@ -66,7 +66,7 @@ export function resolveExecutablePlan(planId) {
  *
  * @returns {{ done: true } | { pick: object } | { stop: string, reason: string }}
  */
-export function selectNextPlanTask(taskIds) {
+export function selectNextPlanTask(taskIds, { triage = false } = {}) {
   const all = loadAllTasks();
   const byId = new Map(all.map((t) => [t.id, t]));
 
@@ -81,12 +81,15 @@ export function selectNextPlanTask(taskIds) {
     return { stop: 'PLAN_TASK_INVALID', reason: `invalid task(s): ${broken.map((t) => t.id).join(', ')}` };
   }
 
-  const outstanding = mine.filter((t) => t.data.status !== 'DONE' && !isExample(t));
+  // DROPPED는 종단 상태다. replan으로 대체된 Task는 Plan을 막지 않는다.
+  const outstanding = mine.filter((t) => !['DONE', 'DROPPED'].includes(t.data.status) && !isExample(t));
   if (outstanding.length === 0) return { done: true };
 
   // 사람의 판단을 기다리는 상태가 남아 있으면 다음 Task로 넘어가지 않는다.
+  // Triage가 켜져 있으면 BLOCKED Task를 골라 executeTask로 보낸다 — 거기서 Triage가 먼저 본다.
   const blocked = outstanding.filter((t) => t.data.status === 'BLOCKED');
   if (blocked.length > 0) {
+    if (triage) return { pick: blocked[0] };
     return { stop: 'PLAN_TASK_BLOCKED', reason: `blocked task(s) need a human: ${blocked.map((t) => t.id).join(', ')}` };
   }
 
@@ -140,7 +143,7 @@ export async function executePlan({
       break;
     }
 
-    const next = selectNextPlanTask(taskIds);
+    const next = selectNextPlanTask(taskIds, { triage: config.limits?.triage?.enabled === true });
     if (next.done) {
       if (config.efficiency?.goal_verification) {
         emit({ event: 'goal-check', plan_id: planId });
@@ -210,6 +213,12 @@ export async function executePlan({
     });
     emit({ event: 'task-end', task_id: taskId, result: out.report.result, execution_id: out.execId });
 
+    if (out.report.result === 'REPLAN') {
+      // Triage의 replan 요청. 사람 정지가 아니다 — start/quick(workflow)이 이어받아 다시 계획한다.
+      result = 'REPLAN'; stopReason = 'TRIAGE_REPLAN';
+      detail = `${taskId}: ${out.report.events.find((e) => e.stage === 'stop')?.detail ?? 'triage requested a replan'}`;
+      break;
+    }
     if (out.report.result !== 'DONE') {
       result = HUMAN_REQUIRED_RESULTS.has(out.report.result) ? out.report.result : 'NEEDS_HUMAN';
       stopReason = 'TASK_STOPPED';

@@ -39,6 +39,7 @@ export async function checkPlanGoal({ planId, taskIds, config }) {
     proc = await adapter.runVerifier({ runId, taskId, subjectSha256: subject.sha256, context,
       systemPrompt: verifierProtocol({ runId, taskId, subjectSha256: subject.sha256, criterionIds: ['GOAL'] }),
       cwd: ROOT, timeoutMs: config.runtime.verifier_timeout_seconds * 1000, model: config.runtime.verifier_model,
+      effort: config.runtime.verifier_effort ?? null, maxBudgetUsd: config.runtime.max_call_budget_usd ?? null,
       schema: verifierResultSchema(), tools: VERIFIER_TOOLS, deny: VERIFIER_DENY });
   } catch (e) { proc = { launch_error: e.message, exit_code: null }; }
   writeFileSync(join(dir, 'stdout.log'), proc.stdout ?? '');

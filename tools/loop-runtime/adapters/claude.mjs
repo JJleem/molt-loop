@@ -13,11 +13,27 @@
 //   --no-session-persistence     세션을 저장하지 않는다 (Verifier는 항상 새 세션이다)
 //   --strict-mcp-config          --mcp-config로 준 것 외의 MCP 서버를 무시한다 (Planner 격리)
 //   --disable-slash-commands     Skill 자동 로드를 끈다 (Planner 격리)
+//   --effort <level>             low · medium · high · xhigh · max. 2026-09-15 CLI 2.1.272에서
+//                                --print와 함께 실행해 확인했다. 응답 payload에는 effort가 없으므로
+//                                Runtime이 요청한 값을 Envelope에 따로 기록한다.
+//   --max-budget-usd <amount>    호출 1회 상한. 같은 날 확인: 상한을 넘기면 exit 1,
+//                                payload.is_error=true, terminal_reason="budget_exhausted",
+//                                total_cost_usd는 그대로 보고된다. 호출 **뒤에** 검사하므로
+//                                첫 응답이 상한을 넘길 수 있다 (0.05 상한에 0.0899 청구 관찰).
 // 여기에 없는 플래그는 추가하지 않는다.
 
 import { spawn } from 'node:child_process';
 
 export const name = 'claude';
+
+/** 선택 플래그. null이면 넘기지 않는다 — CLI 기본값을 추측해서 채우지 않는다. */
+function optionalFlags({ model, effort, maxBudgetUsd }) {
+  const args = [];
+  if (model) args.push('--model', model);
+  if (effort) args.push('--effort', effort);
+  if (Number.isFinite(maxBudgetUsd) && maxBudgetUsd > 0) args.push('--max-budget-usd', String(maxBudgetUsd));
+  return args;
+}
 
 export async function detect() {
   const r = await capture('claude', ['--version'], 15_000);
@@ -65,9 +81,10 @@ function capture(cmd, args, timeoutMs, { stdin, cwd } = {}) {
  * self-check 진입점 하나만 allow에 넣는다(worker/policy.mjs) — 임의 명령은 여전히 거부된다.
  *
  * @param {{context: string, systemPrompt: string, cwd: string, timeoutMs: number,
- *          model: string|null, deny: string[], allow: string[]}} opts
+ *          model: string|null, effort?: string|null, maxBudgetUsd?: number|null,
+ *          deny: string[], allow: string[]}} opts
  */
-export async function runWorker({ context, systemPrompt, cwd, timeoutMs, model, deny = [], allow = [] }) {
+export async function runWorker({ context, systemPrompt, cwd, timeoutMs, model, effort = null, maxBudgetUsd = null, deny = [], allow = [] }) {
   const args = [
     '--print',
     '--output-format', 'json',
@@ -78,7 +95,7 @@ export async function runWorker({ context, systemPrompt, cwd, timeoutMs, model, 
   if (deny.length > 0) permissions.deny = deny;
   if (allow.length > 0) permissions.allow = allow;
   if (Object.keys(permissions).length > 0) args.push('--settings', JSON.stringify({ permissions }));
-  if (model) args.push('--model', model);
+  args.push(...optionalFlags({ model, effort, maxBudgetUsd }));
 
   const started = Date.now();
   const r = await capture('claude', args, timeoutMs, { stdin: context, cwd });
@@ -154,7 +171,7 @@ function readMeta(payload) {
  * @param {{context: string, systemPrompt: string, cwd: string, timeoutMs: number,
  *          model: string|null, schema: object, tools: string[], deny: string[]}} opts
  */
-export async function runVerifier({ context, systemPrompt, cwd, timeoutMs, model, schema, tools, deny = [] }) {
+export async function runVerifier({ context, systemPrompt, cwd, timeoutMs, model, effort = null, maxBudgetUsd = null, schema, tools, deny = [] }) {
   const args = [
     '--print',
     '--output-format', 'json',
@@ -168,7 +185,7 @@ export async function runVerifier({ context, systemPrompt, cwd, timeoutMs, model
     args.push('--disallowedTools', ...deny);
     args.push('--settings', JSON.stringify({ permissions: { deny } }));
   }
-  if (model) args.push('--model', model);
+  args.push(...optionalFlags({ model, effort, maxBudgetUsd }));
 
   const started = Date.now();
   const r = await capture('claude', args, timeoutMs, { stdin: context, cwd });
@@ -222,7 +239,7 @@ export async function runVerifier({ context, systemPrompt, cwd, timeoutMs, model
  * @param {{context: string, systemPrompt: string, cwd: string, timeoutMs: number,
  *          model: string|null, schema: object, tools: string[], deny: string[]}} opts
  */
-export async function runPlanner({ context, systemPrompt, cwd, timeoutMs, model, schema, tools, deny = [] }) {
+export async function runPlanner({ context, systemPrompt, cwd, timeoutMs, model, effort = null, maxBudgetUsd = null, schema, tools, deny = [] }) {
   const args = [
     '--print',
     '--output-format', 'json',
@@ -237,7 +254,7 @@ export async function runPlanner({ context, systemPrompt, cwd, timeoutMs, model,
     args.push('--disallowedTools', ...deny);
     args.push('--settings', JSON.stringify({ permissions: { deny } }));
   }
-  if (model) args.push('--model', model);
+  args.push(...optionalFlags({ model, effort, maxBudgetUsd }));
 
   const started = Date.now();
   const r = await capture('claude', args, timeoutMs, { stdin: context, cwd });
@@ -277,3 +294,9 @@ export async function runPlanner({ context, systemPrompt, cwd, timeoutMs, model,
   out.adapter_meta = readMeta(payload);
   return out;
 }
+
+/**
+ * Triage 실행 — Verifier와 같은 형태의 읽기 전용 새 invocation이다. 결과는 구조화 출력으로만 받는다.
+ * Triage는 완료를 선언하지 못하고 Runtime이 준 메뉴에서 다음 행동만 고른다. 쓰기 도구를 주지 않는다.
+ */
+export const runTriage = runVerifier;

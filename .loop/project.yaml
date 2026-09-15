@@ -20,8 +20,45 @@ runtime:
   task_resources: true           # 관련 파일·심볼·해시를 최대 6,000자로 제공
   gate_only_completion: true     # requires_verifier: false + 모든 AC가 Gate인 Task만
   max_parallel_gates: 2          # 각 Gate에 parallel_safe: true가 있어야 병렬 실행
-  recovery_paths: []             # 자동 재검증을 허용할 정확한 경로. glob/제어 파일은 불가.
+  # 검증 중에 사람이 바꿔도 새 subject로 Gate만 다시 돌리고 계속 가는 경로(OBS-003). 제외가 아니라 재검사다.
+  recovery_paths:
+    - docs/
+    - README.md
+    - CLAUDE.local.md
+    - START-HERE.md
   worker_simple_model: null      # 작은 Gate-only Task의 첫 시도용 모델. null이면 worker_model.
+
+  # Effort는 provider CLI의 --effort 값(low · medium · high · xhigh · max)이다. null이면 플래그를 넘기지 않는다.
+  # 2026-09-15 Claude Code 2.1.272에서 --print와 함께 동작을 확인했다. 응답에 effort가 없으므로
+  # Envelope에는 요청값(effort_requested)으로 기록된다.
+  worker_effort: null
+  verifier_effort: null
+  planner_effort: null
+  # AI 호출 1회의 상한(USD). provider가 호출 **뒤에** 검사한다 — 첫 응답이 상한을 넘길 수 있고,
+  # 넘기면 그 호출은 실패(terminal_reason=budget_exhausted)로 기록된다. null이면 상한 없음.
+  max_call_budget_usd: null
+
+  # Triage 역할(정지 지점 판단). adapter가 null이면 verifier_adapter를 쓴다. 켜고 끄는 것은 policies/limits.yaml의 triage 절이다.
+  triage_adapter: null
+  triage_timeout_seconds: 300
+  triage_model: null
+  triage_effort: null
+
+  # 프로필: 속도·비용에 관한 값만 묶어서 고른다. Gate·Verifier 요구·승인 경계는 바꾸지 못한다.
+  # `loopctl quick`은 기본으로 `quick`을 쓴다. `--profile <name>`으로 start/execute-plan/execute/plan에도 적용된다.
+  # 허용 키: worker_model verifier_model planner_model worker_effort verifier_effort planner_effort
+  #         worker_timeout_seconds verifier_timeout_seconds planner_timeout_seconds
+  #         max_call_budget_usd goal_verification max_tasks_per_plan triage triage_model triage_effort triage_timeout_seconds
+  profiles:
+    quick:
+      worker_effort: low
+      verifier_effort: low
+      planner_effort: medium
+      max_tasks_per_plan: 4
+      goal_verification: false
+      worker_timeout_seconds: 600
+    manual:                      # 이전 동작: 판단이 필요하면 곧바로 사람에게
+      triage: false
 
   # Worker 실행 설정
   worker_adapter: claude          # loopctl adapters 로 사용 가능 여부 확인

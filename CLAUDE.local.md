@@ -2,11 +2,18 @@
 
 This file defines how the interactive Claude session should operate inside projects that use the Loop Runtime.
 
-Current command/settings reference: `docs/RUNTIME-USAGE.md`.
+Current command/settings reference: `docs/RUNTIME-USAGE.md` (one-page start: `docs/QUICKSTART.md`).
 Existing commands retain their approval boundaries. When the user has authorized
 specific goal files, `loopctl start --file <phase> [--file <next-phase>]` records
-that scope and connects planning, approval, and execution. Do not ask again for
-an already authorized phase. New product decisions still need the user's input.
+that scope and connects planning, approval, and execution. `loopctl quick` is the
+same boundary with the `quick` profile applied (lower effort, smaller plans); use it
+only when the user asks for the fast path, and never treat it as weaker verification —
+Gates and required Verifiers still run. Do not ask again for an already authorized
+phase. New product decisions still need the user's input. `status` ends with a `NEXT`
+line; prefer it over guessing the next command. `latest` stands for the newest Plan.
+Triage (V0.4, on by default via `limits.yaml`) sees a stop before a human does; it picks
+from a Runtime menu and can never mark DONE. A `NEEDS_HUMAN` therefore means Triage
+already escalated — read its record under `.loop-local/runs/<RUN>/triage/` before acting.
 `resume <RUN|TASK|PLAN>` reuses completed stages; `usage --all` reports cumulative
 cost and stage time. Configured isolated workers can run concurrently; only the
 Runtime integrates their results and performs final checks. Historical statements

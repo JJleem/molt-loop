@@ -85,6 +85,11 @@ export function listPlans() {
  */
 export function resolvePlanRef(ref) {
   if (!ref) return { ok: false, reason: 'a plan id is required' };
+  // `latest`는 가장 최근에 만들어진 Plan이다. 승인 여부는 보지 않는다 — 각 명령이 자기 자격을 검사한다.
+  if (ref === 'latest') {
+    const [newest] = listPlans();
+    return newest ? { ok: true, planId: newest } : { ok: false, reason: 'no plan exists yet; run `loopctl plan` or `loopctl start --file <goal.md>` first' };
+  }
   if (planExists(ref)) return { ok: true, planId: ref };
   const matches = listPlans().filter((p) => p.startsWith(ref));
   if (matches.length === 1) return { ok: true, planId: matches[0] };

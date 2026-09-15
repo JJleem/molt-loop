@@ -17,6 +17,18 @@ import { evaluateStop, loopGuardLimit } from './stop-evaluator.mjs';
 import { completeGateOnly } from '../gate/complete.mjs';
 import { checkBudget } from '../usage-ledger.mjs';
 import { integrateWorkspace } from '../worker/isolation.mjs';
+import { relative } from 'node:path';
+import { ROOT } from '../task-store.mjs';
+import { archivePriorVerification, verificationDirFor, readVerificationReport } from '../verifier/runner.mjs';
+import { runTriageOnce, triageEnabled, writeClarification } from '../recovery/triage.mjs';
+
+const relPath = (p) => relative(ROOT, p).split('\\').join('/');
+
+/** 사람 대신 Triage가 먼저 볼 수 있는 정지. 예산·PAUSE·타임아웃·환경 오류는 여기 없다. */
+const TRIAGE_STOPS = new Set([
+  'NEEDS_HUMAN:NEEDS_HUMAN', 'NEEDS_HUMAN:RECOVERY_AMBIGUOUS',
+  'STALLED:REPEATED_IDENTICAL_FAILURE', 'LIMIT_REACHED:RETRY_BUDGET_EXHAUSTED', 'BLOCKED:TASK_BLOCKED',
+]);
 import {
   ACTIVE_DIR, allocateExecutionId, buildExecutionReport, buildUsageSummary,
   writeExecutionReport, executionDir, readActiveMarker, classifyActiveMarker,
@@ -176,7 +188,37 @@ export async function executeTask({ taskId, config, emit = () => {}, isInterrupt
           a.action = d.recommended_action;
           record('diagnose', { run_id: d.run_id, result: d.failure_class, action: d.recommended_action });
         }
-        record('stop', { result, reason: stopReason, detail: verdict.detail ?? next.reason });
+        const detail = verdict.detail ?? next.reason;
+
+        // --- Triage: 사람을 부르기 전에 먼저 본다. 메뉴에서만 고르고, DONE은 메뉴에 없다.
+        if (triageEnabled(config) && TRIAGE_STOPS.has(`${result}:${stopReason}`)) {
+          const run = next.run ?? latestRunForTask(taskId);
+          if (run) noteRun(run);
+          writeClaim(taskId, execId, { stage: 'triage', run_id: run?.runId ?? null });
+          let t;
+          try {
+            t = await runTriageOnce({
+              kind: 'task', config, task, run, next,
+              stop: { result, reason: stopReason, detail },
+              planId: config.executionPlanId ?? null, goal: config.executionGoal ?? null,
+              replanCapable: config.replanCapable === true,
+            });
+          } catch (e) {
+            t = { decision: 'ESCALATE', reason: `triage could not run: ${e.message}`, skipped: true, valid: false, dir: null };
+          }
+          record('triage', { run_id: run?.runId ?? null, result: t.decision, detail: t.reason, artifact: t.dir ? relPath(t.dir) : null, skipped: t.skipped === true, evidence_refs: t.evidence_refs ?? [] });
+          if (t.decision !== 'ESCALATE') {
+            const applied = await applyTriageDecision({ decision: t, task, run, config, taskId, execId, record, attemptEntry, noteRun });
+            if (applied.continue) { transitions += 1; continue; }
+            result = applied.result; stopReason = applied.reason;
+            record('stop', { result, reason: stopReason, detail: applied.detail });
+            break;
+          }
+          record('stop', { result, reason: stopReason, detail: `${detail}\n  triage: ${t.reason}` });
+          break;
+        }
+
+        record('stop', { result, reason: stopReason, detail });
         break;
       }
 
@@ -338,6 +380,64 @@ export async function executeTask({ taskId, config, emit = () => {}, isInterrupt
   });
   const reportPath = writeExecutionReport(execId, report);
   return { report, reportPath, execId, result: report.result };
+}
+
+/**
+ * Triage 결정을 실행한다. 여기 있는 행동은 전부 사람이 CLI로 할 수 있는 것과 같은 단계 함수를 부른다.
+ * DONE 전이는 없다.
+ * @returns {{ continue: true } | { continue: false, result, reason, detail }}
+ */
+async function applyTriageDecision({ decision: t, task, run, config, taskId, execId, record, attemptEntry, noteRun }) {
+  const stop = (result, reason, detail) => ({ continue: false, result, reason, detail });
+  switch (t.decision) {
+    case 'RERUN_GATES': {
+      if (!run) return stop('NEEDS_HUMAN', 'GATE_NOT_ELIGIBLE', 'triage asked to rerun gates but there is no run');
+      const vdir = verificationDirFor(run.runDir);
+      const archived = readVerificationReport(vdir) ? archivePriorVerification(vdir) : null;
+      writeClaim(taskId, execId, { stage: 'gate', run_id: run.runId });
+      const g = await stageGate({ task, run, config, rerun: true });
+      if (!g.ok) return stop('NEEDS_HUMAN', 'GATE_NOT_ELIGIBLE', g.errors.join(' '));
+      const a = attemptEntry(run.manifest?.attempt ?? 1, run.runId);
+      a.gate = g.report.result;
+      record('gate', { run_id: run.runId, result: g.report.result, gates: g.report.gates.map((x) => ({ name: x.name, status: x.status })), triage: 'RERUN_GATES', archived_verification: archived });
+      return { continue: true };
+    }
+    case 'RERUN_VERIFIER': {
+      if (!run) return stop('NEEDS_HUMAN', 'VERIFIER_NOT_ELIGIBLE', 'triage asked to rerun the verifier but there is no run');
+      writeClaim(taskId, execId, { stage: 'verifier', run_id: run.runId });
+      const v = await stageVerify({ task, run, config, rerun: true });
+      if (!v.ok && v.refused) return stop('NEEDS_HUMAN', 'VERIFIER_NOT_ELIGIBLE', v.errors.join(' '));
+      if (!v.ok) return stop('FAILED', 'VERIFIER_LAUNCH_FAILED', v.errors.join(' '));
+      const a = attemptEntry(run.manifest?.attempt ?? 1, run.runId);
+      a.verifier = v.report.verifier_result ?? 'INVALID';
+      record('verifier', { run_id: run.runId, result: v.report.result, verifier_result: v.report.verifier_result ?? 'INVALID', transition: v.transition ? `${v.transition.from} -> ${v.transition.to}` : null, triage: 'RERUN_VERIFIER' });
+      return { continue: true };
+    }
+    case 'RETRY_WITH_LESSON': {
+      if (!run) return stop('NEEDS_HUMAN', 'RETRY_REFUSED', 'triage asked to retry but there is no run');
+      const started = startRetryAttempt({ task, run, config, triage: { lesson: t.lesson, recovery_hint: t.recovery_hint, evidence_refs: t.evidence_refs } });
+      if (!started.ok) return stop('NEEDS_HUMAN', 'RETRY_REFUSED', started.errors.join(' '));
+      noteRun({ runId: started.snapshot.runId, runDir: started.snapshot.runDir });
+      attemptEntry(started.attempt, started.snapshot.runId);
+      writeClaim(taskId, execId, { stage: 'worker', run_id: started.snapshot.runId, attempt: started.attempt });
+      const w = await stageWorker({ task, snapshot: started.snapshot, config, attempt: started.attempt });
+      const a = attemptEntry(started.attempt, started.snapshot.runId);
+      a.worker = w.ok ? (w.transition?.to ?? 'no-transition') : 'failed';
+      record('worker', { run_id: started.snapshot.runId, attempt: started.attempt, result: a.worker, failures: w.failures, retry_of: run.runId, triage: 'RETRY_WITH_LESSON' });
+      return { continue: true };
+    }
+    case 'UNBLOCK': {
+      const moved = writeStatus(task, 'TODO');
+      if (!moved.ok) return stop('BLOCKED', 'TASK_BLOCKED', moved.reason);
+      const p = writeClarification(taskId, { lesson: t.lesson, reason: t.reason, evidence_refs: t.evidence_refs ?? [], source: t.dir ? relPath(t.dir) : null });
+      record('recovery', { run_id: run?.runId ?? null, result: `${moved.from} -> ${moved.to}`, detail: `triage UNBLOCK: ${t.reason}`, clarification: relPath(p) });
+      return { continue: true };
+    }
+    case 'REPLAN':
+      return stop('REPLAN', 'TRIAGE_REPLAN', t.reason);
+    default:
+      return stop('NEEDS_HUMAN', 'NEEDS_HUMAN', `unknown triage decision ${t.decision}`);
+  }
 }
 
 export { executionDir, isPaused, isExample };

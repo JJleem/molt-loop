@@ -6,6 +6,8 @@
 //                      stdout, stderr, provider_usage, model, adapter_meta }
 //   runVerifier() -> 위와 같고 + structured_output (읽기 전용 실행, 결과 파일을 쓰지 않는다)
 //   runPlanner()  -> runVerifier와 같은 모양. Goal -> Task 제안. 역시 읽기 전용이다.
+//   runTriage()   -> runVerifier와 같은 모양. 정지 지점에서 다음 행동을 메뉴에서 고른다. 선택 구현 —
+//                    없으면 Runtime이 runVerifier를 대신 쓴다. 역시 읽기 전용이다.
 // Runtime core는 이 모양에만 의존한다. 특정 CLI를 loopctl에 하드코딩하지 않는다.
 //
 // Worker · Verifier · Planner는 같은 adapter를 쓰더라도 **항상 별개의 invocation**이다.

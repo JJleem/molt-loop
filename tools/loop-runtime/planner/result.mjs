@@ -7,6 +7,12 @@
 // 결과는 provider의 구조화 출력 채널로만 받는다. 대화 텍스트는 Plan이 아니다.
 
 export const PLANNER_RESULTS = ['PROPOSED', 'NEEDS_HUMAN', 'REFUSED'];
+/**
+ * 사람 질문의 분류. Runtime(Triage)이 스펙·저장소만 보고 답해도 되는 것과 사람만 답할 수 있는 것을 가른다.
+ *   spec · implementation   문서나 저장소에 답이 있을 수 있다 -> Triage가 답을 시도할 수 있다
+ *   security · irreversible · product · other   사람의 결정이다. 자동으로 답하지 않는다
+ */
+export const QUESTION_CATEGORIES = ['spec', 'implementation', 'security', 'irreversible', 'product', 'other'];
 export const PROPOSAL_ID_RE = /^P[1-9][0-9]*$/;
 
 // 사람에게 물을 질문의 상한. 무한한 질문 목록은 결정이 아니다.
@@ -42,6 +48,7 @@ export function plannerResultSchema() {
       assumptions: { type: 'array', items: { type: 'string' } },
       risks: { type: 'array', items: { type: 'string' } },
       human_questions: { type: 'array', items: { type: 'string' } },
+      human_question_categories: { type: 'array', items: { type: 'string', enum: QUESTION_CATEGORIES }, description: 'human_questions와 같은 길이. 각 질문의 분류.' },
       tasks: {
         type: 'array',
         items: {
@@ -124,7 +131,9 @@ export function plannerProtocol({ planId, roles, gates, maxTasks, subjectSha256 
     '"완료 조건은 나중에 정한다"는 허용되지 않는다. 만들 수 없으면 result를 NEEDS_HUMAN으로 한다.',
     '',
     'result가 NEEDS_HUMAN 또는 REFUSED면 tasks는 빈 배열이어야 한다.',
-    'NEEDS_HUMAN이면 human_questions에 사람이 답해야 할 것을 적는다.',
+    'NEEDS_HUMAN이면 human_questions에 사람이 답해야 할 것을 적고, human_question_categories에 같은 순서로 분류를 적는다:',
+    '  spec · implementation (문서나 저장소에 답이 있을 수 있음 — Runtime이 먼저 찾아본다)',
+    '  security · irreversible · product · other (사람의 결정 — 자동으로 답하지 않는다)',
     '',
     '결과는 구조화 출력(JSON schema)으로만 반환된다. 산문 요약은 Plan으로 인정되지 않는다.',
     'Plan을 승인하는 것은 너의 권한이 아니다. 승인은 사람이 `loopctl plan-approve`로만 한다.',

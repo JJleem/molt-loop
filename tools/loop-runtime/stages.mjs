@@ -90,11 +90,18 @@ export function startFirstAttempt({ task, config, tasks = null }) {
  * 재시도 Attempt 준비 — 진단 기반 자격 확인 + (필요시) REVIEW -> IN_PROGRESS + Snapshot.
  * @returns {{ ok, errors, pre, transition?, snapshot?, attempt? }}
  */
-export function startRetryAttempt({ task, run, config }) {
+export function startRetryAttempt({ task, run, config, triage = null }) {
   const budget = checkBudget({ config, taskId: task.id });
   if (!budget.allowed) return { ok: false, errors: budget.reasons };
-  const pre = checkRetryEligibility({ task, run, config });
+  const pre = checkRetryEligibility({ task, run, config, triage });
   if (!pre.ok) return { ok: false, errors: pre.errors, pre };
+  // Triage의 lesson은 Runtime이 증류한 memo와 같은 모양으로 들어간다. 이전 transcript는 여전히 들어가지 않는다.
+  const memos = triage ? [...pre.memos, {
+    schema: 1, source_run_id: run.runId, attempt: pre.assessment.diagnosis.attempt, stage: 'triage',
+    failure_class: `TRIAGE (${pre.assessment.diagnosis.failure_class})`, lesson: triage.lesson,
+    recovery_hint: triage.recovery_hint ?? null, failed_gates: [], failed_criteria: [],
+    evidence_refs: triage.evidence_refs ?? [], failure_fingerprint: pre.assessment.diagnosis.failure_fingerprint,
+  }] : pre.memos;
 
   let transition = null;
   if (pre.needsTransition) {
@@ -107,7 +114,8 @@ export function startRetryAttempt({ task, run, config }) {
   let snapshot;
   try {
     snapshot = writeRetrySnapshot({
-      task, sourceRun: run, diagnosis: pre.assessment.diagnosis, memos: pre.memos, attempt: pre.nextAttempt,
+      task, sourceRun: run, diagnosis: pre.assessment.diagnosis, memos, attempt: pre.nextAttempt,
+      retryAction: triage ? 'RETRY_WITH_TRIAGE' : null,
     });
   } catch (e) {
     return { ok: false, errors: [`Snapshot failed: ${e.message}`], pre, transition };

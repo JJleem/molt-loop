@@ -13,7 +13,7 @@ export function usageLedger({ taskIds = null, planId = null, localDir = LOCAL_DI
     if (!existsSync(dir)) return;
     const manifest = read(join(dir, 'manifest.json'));
     taskId = manifest?.task_id ?? taskId;
-    for (const stage of ['worker', 'verifier', 'planner']) {
+    for (const stage of ['worker', 'verifier', 'planner', 'triage']) {
       const receipt = join(dir, `${stage}-started.json`);
       const envelope = stage === 'worker' ? 'runtime-envelope.json' : `${stage}-envelope.json`;
       if ((includePlanReview || !ids || ids.has(taskId)) && existsSync(receipt) && !existsSync(join(dir, envelope))) {
@@ -24,7 +24,7 @@ export function usageLedger({ taskIds = null, planId = null, localDir = LOCAL_DI
       const p = join(dir, e.name);
       if (e.isDirectory()) { visit(p, taskId); continue; }
       if (!includePlanReview && ids && !ids.has(taskId)) continue;
-      if (['runtime-envelope.json', 'verifier-envelope.json', 'planner-envelope.json'].includes(e.name)) {
+      if (['runtime-envelope.json', 'verifier-envelope.json', 'planner-envelope.json', 'triage-envelope.json'].includes(e.name)) {
         const env = read(p);
         invocations.push({
           artifact: relative(localDir, p).split('\\').join('/'), task_id: taskId,
@@ -45,6 +45,7 @@ export function usageLedger({ taskIds = null, planId = null, localDir = LOCAL_DI
   if (planId) {
     includePlanReview = true;
     visit(join(localDir, 'plans', planId, 'goal-checks'));
+    visit(join(localDir, 'plans', planId, 'triage'));
     includePlanReview = false;
     // A plan's planner cost belongs to its budget, even when tasks are filtered.
     const p = join(localDir, 'plans', planId, 'planner-envelope.json');
@@ -61,7 +62,8 @@ export function usageLedger({ taskIds = null, planId = null, localDir = LOCAL_DI
   for (const e of existsSync(executionRoot) ? readdirSync(executionRoot, { withFileTypes: true }) : []) {
     if (!e.isDirectory() || !e.name.startsWith('EXEC-')) continue;
     const r = read(join(executionRoot, e.name, 'execution-report.json'));
-    if (r && (!ids || ids.has(r.task_id)) && ['NEEDS_HUMAN', 'BLOCKED', 'STALLED'].includes(r.result)) stops.push({ task_id: r.task_id, execution_id: r.execution_id, reason: r.stop_reason });
+    // 사람이 봐야 끝나는 정지 전부. 재시도 한도 소진(LIMIT_REACHED)도 사람이 봐야 하는 정지다.
+    if (r && (!ids || ids.has(r.task_id)) && ['NEEDS_HUMAN', 'BLOCKED', 'STALLED', 'LIMIT_REACHED'].includes(r.result)) stops.push({ task_id: r.task_id, execution_id: r.execution_id, reason: r.stop_reason });
   }
   const tokens = {};
   for (const field of ['input', 'output', 'cached_input', 'cache_creation_input']) {
@@ -73,7 +75,8 @@ export function usageLedger({ taskIds = null, planId = null, localDir = LOCAL_DI
     retry_worker_cost_usd_known: known.filter((i) => i.stage === 'worker' && i.attempt > 1).reduce((n, i) => n + i.provider_cost_usd, 0),
     known_cost_usd: known.reduce((n, i) => n + i.provider_cost_usd, 0),
     unknown_cost_invocations: invocations.length - known.length,
-    stage_ms: Object.fromEntries(['worker', 'verifier', 'planner'].map((s) => [s, invocations.filter((i) => i.stage === s).reduce((n, i) => n + (i.duration_ms ?? 0), 0)]).concat([['gate', gates.reduce((n, g) => n + (g.duration_ms ?? 0), 0)]])),
+    triage_decisions: invocations.filter((i) => i.stage === 'triage' && !i.unfinished).length,
+    stage_ms: Object.fromEntries(['worker', 'verifier', 'planner', 'triage'].map((s) => [s, invocations.filter((i) => i.stage === s).reduce((n, i) => n + (i.duration_ms ?? 0), 0)]).concat([['gate', gates.reduce((n, g) => n + (g.duration_ms ?? 0), 0)]])),
   };
 }
 

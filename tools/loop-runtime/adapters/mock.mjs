@@ -45,7 +45,26 @@ export async function detect() {
   return { available: true, version: 'mock (runtime test double)' };
 }
 
-export async function runWorker({ resultPath, timeoutMs, runId, taskId, model = null }) {
+/**
+ * 호출 순서대로 값을 꺼내는 시퀀스. `<NAME>_SEQ`가 JSON 배열이면 n번째 호출은 n번째 값이고
+ * 마지막 값이 이후 계속 쓰인다. 카운터는 subject에서 제외되는 .loop-local/ 아래에 둔다.
+ */
+function seqValue(name, fallback) {
+  const raw = process.env[`${name}_SEQ`];
+  if (raw === undefined) return fallback;
+  const seq = JSON.parse(raw);
+  const counter = process.env[`${name}_SEQ_FILE`] ?? `.loop-local/mock-${name.toLowerCase()}-seq`;
+  let n = 0;
+  try { n = Number(readFileSync(counter, 'utf8')) || 0; } catch { n = 0; }
+  writeFileSync(counter, String(n + 1), 'utf8');
+  const v = seq[Math.min(n, seq.length - 1)];
+  return v === null || v === undefined ? undefined : (typeof v === 'string' ? v : JSON.stringify(v));
+}
+
+/** Runtime이 넘긴 선택 옵션을 그대로 돌려준다. 테스트가 provider 없이 전달 여부를 확인한다. */
+const received = ({ model = null, effort = null, maxBudgetUsd = null }) => ({ model, effort, max_budget_usd: maxBudgetUsd });
+
+export async function runWorker({ resultPath, timeoutMs, runId, taskId, model = null, effort = null, maxBudgetUsd = null }) {
   const started = Date.now();
   const sleep = Number(process.env.LOOP_MOCK_SLEEP_MS ?? 0);
   if (sleep > 0) {
@@ -63,15 +82,16 @@ export async function runWorker({ resultPath, timeoutMs, runId, taskId, model = 
   if (process.env.LOOP_MOCK_WRITE_PATH) {
     writeFileSync(process.env.LOOP_MOCK_WRITE_PATH.replaceAll('__TASK__', taskId), (process.env.LOOP_MOCK_WRITE_BODY ?? '').replaceAll('__TASK__', taskId), 'utf8');
   }
-  if (process.env.LOOP_MOCK_RESULT !== undefined) {
-    const body = process.env.LOOP_MOCK_RESULT.replaceAll('__RUN__', runId).replaceAll('__TASK__', taskId);
+  const resultBody = seqValue('LOOP_MOCK_RESULT', process.env.LOOP_MOCK_RESULT);
+  if (resultBody !== undefined) {
+    const body = resultBody.replaceAll('__RUN__', runId).replaceAll('__TASK__', taskId);
     writeFileSync(resultPath, body, 'utf8');
   }
 
   return {
     adapter: name,
     launch_error: process.env.LOOP_MOCK_LAUNCH_ERROR ?? null,
-    exit_code: Number(process.env.LOOP_MOCK_EXIT ?? 0),
+    exit_code: Number(seqValue('LOOP_MOCK_EXIT', process.env.LOOP_MOCK_EXIT ?? '0')),
     signal: null,
     timed_out: false,
     duration_ms: Date.now() - started,
@@ -79,12 +99,12 @@ export async function runWorker({ resultPath, timeoutMs, runId, taskId, model = 
     stderr: '',
     provider_usage: process.env.LOOP_MOCK_USAGE ? JSON.parse(process.env.LOOP_MOCK_USAGE) : null,
     model,
-    adapter_meta: { mock: true, provider_cost_usd: process.env.LOOP_MOCK_COST === undefined ? null : Number(process.env.LOOP_MOCK_COST) },
+    adapter_meta: { mock: true, received: received({ model, effort, maxBudgetUsd }), provider_cost_usd: process.env.LOOP_MOCK_COST === undefined ? null : Number(process.env.LOOP_MOCK_COST) },
   };
 }
 
 /** Verifier test double. LLM을 호출하지 않는다. 결과는 구조화 출력 채널로 돌려준다. */
-export async function runVerifier({ timeoutMs, runId, taskId, subjectSha256 }) {
+export async function runVerifier({ timeoutMs, runId, taskId, subjectSha256, model = null, effort = null, maxBudgetUsd = null }) {
   const started = Date.now();
   const sleep = Number(process.env.LOOP_MOCK_VERIFIER_SLEEP_MS ?? 0);
   if (sleep > 0) {
@@ -139,12 +159,12 @@ export async function runVerifier({ timeoutMs, runId, taskId, subjectSha256 }) {
     provider_usage: process.env.LOOP_MOCK_VERIFIER_USAGE ? JSON.parse(process.env.LOOP_MOCK_VERIFIER_USAGE) : null,
     model: process.env.LOOP_MOCK_VERIFIER_MODEL ?? null,
     structured_output: structured,
-    adapter_meta: { mock: true, provider_cost_usd: process.env.LOOP_MOCK_VERIFIER_COST === undefined ? null : Number(process.env.LOOP_MOCK_VERIFIER_COST) },
+    adapter_meta: { mock: true, received: received({ model, effort, maxBudgetUsd }), provider_cost_usd: process.env.LOOP_MOCK_VERIFIER_COST === undefined ? null : Number(process.env.LOOP_MOCK_VERIFIER_COST) },
   };
 }
 
 /** Planner test double. LLM을 호출하지 않는다. 결과는 구조화 출력 채널로 돌려준다. */
-export async function runPlanner({ timeoutMs, planId, subjectSha256 }) {
+export async function runPlanner({ timeoutMs, planId, subjectSha256, model = null, effort = null, maxBudgetUsd = null }) {
   const started = Date.now();
   const sleep = Number(process.env.LOOP_MOCK_PLANNER_SLEEP_MS ?? 0);
   if (sleep > 0) {
@@ -163,10 +183,11 @@ export async function runPlanner({ timeoutMs, planId, subjectSha256 }) {
   }
 
   let structured = null;
+  const plannerBody = seqValue('LOOP_MOCK_PLANNER', process.env.LOOP_MOCK_PLANNER);
   if (process.env.LOOP_MOCK_PLANNER_RAW !== undefined) {
     structured = process.env.LOOP_MOCK_PLANNER_RAW;   // 객체가 아닌 값 -> Runtime이 거부해야 한다
-  } else if (process.env.LOOP_MOCK_PLANNER !== undefined) {
-    const body = process.env.LOOP_MOCK_PLANNER
+  } else if (plannerBody !== undefined) {
+    const body = plannerBody
       .replaceAll('__PLAN__', planId)
       .replaceAll('__SUBJECT__', subjectSha256 ?? '');
     try {
@@ -188,6 +209,34 @@ export async function runPlanner({ timeoutMs, planId, subjectSha256 }) {
     provider_usage: process.env.LOOP_MOCK_PLANNER_USAGE ? JSON.parse(process.env.LOOP_MOCK_PLANNER_USAGE) : null,
     model: process.env.LOOP_MOCK_PLANNER_MODEL ?? null,
     structured_output: structured,
-    adapter_meta: { mock: true, provider_cost_usd: process.env.LOOP_MOCK_PLANNER_COST === undefined ? null : Number(process.env.LOOP_MOCK_PLANNER_COST) },
+    adapter_meta: { mock: true, received: received({ model, effort, maxBudgetUsd }), provider_cost_usd: process.env.LOOP_MOCK_PLANNER_COST === undefined ? null : Number(process.env.LOOP_MOCK_PLANNER_COST) },
+  };
+}
+
+// Triage용 (runTriage):
+//   LOOP_MOCK_TRIAGE / LOOP_MOCK_TRIAGE_SEQ   structured_output으로 돌려줄 JSON (__TASK__ / __RUN__ 치환)
+//   LOOP_MOCK_TRIAGE_EXIT · LOOP_MOCK_TRIAGE_COST · LOOP_MOCK_TRIAGE_USAGE · LOOP_MOCK_TRIAGE_TOUCH
+export async function runTriage({ taskId = null, runId = null, model = null, effort = null, maxBudgetUsd = null }) {
+  const started = Date.now();
+  if (process.env.LOOP_MOCK_TRIAGE_TOUCH) appendFileSync(process.env.LOOP_MOCK_TRIAGE_TOUCH, '\n# mock triage was here\n');
+  let structured = null;
+  const body = seqValue('LOOP_MOCK_TRIAGE', process.env.LOOP_MOCK_TRIAGE);
+  if (body !== undefined) {
+    const text = body.replaceAll('__TASK__', taskId ?? '').replaceAll('__RUN__', runId ?? '');
+    try { structured = JSON.parse(text); } catch { structured = text; }
+  }
+  return {
+    adapter: name,
+    launch_error: process.env.LOOP_MOCK_TRIAGE_LAUNCH_ERROR ?? null,
+    exit_code: Number(process.env.LOOP_MOCK_TRIAGE_EXIT ?? 0),
+    signal: null,
+    timed_out: false,
+    duration_ms: Date.now() - started,
+    stdout: 'mock triage stdout\n',
+    stderr: '',
+    provider_usage: process.env.LOOP_MOCK_TRIAGE_USAGE ? JSON.parse(process.env.LOOP_MOCK_TRIAGE_USAGE) : null,
+    model: process.env.LOOP_MOCK_TRIAGE_MODEL ?? null,
+    structured_output: structured,
+    adapter_meta: { mock: true, received: received({ model, effort, maxBudgetUsd }), provider_cost_usd: process.env.LOOP_MOCK_TRIAGE_COST === undefined ? null : Number(process.env.LOOP_MOCK_TRIAGE_COST) },
   };
 }

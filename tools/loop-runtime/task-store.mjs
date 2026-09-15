@@ -25,7 +25,7 @@ const TOP_LEVEL_KEYS = new Set([
 
 // Runtime 내부 Role. Task의 execution.role 로 배정할 수 있는 Role이 아니다.
 // (.loop/skills/ 에 파일이 있는 것과 "실행 Role"인 것은 다르다.)
-export const RUNTIME_ROLES = ['verifier', 'planner'];
+export const RUNTIME_ROLES = ['verifier', 'planner', 'triage'];
 
 // V0 Acceptance Criteria: { id, description, verification: { type: gate|verifier, ref|instruction } }
 // human · 복합식(AND/OR) · threshold는 아직 도입하지 않는다.

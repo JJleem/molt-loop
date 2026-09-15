@@ -7,13 +7,14 @@
 import { validateTask, executionRoles } from '../task-store.mjs';
 import { loadGateConfig } from '../gate/resolver.mjs';
 import {
-  PLANNER_RESULTS, PROPOSAL_ID_RE, MAX_HUMAN_QUESTIONS, MAX_ASSUMPTIONS, MAX_RISKS,
+  PLANNER_RESULTS, PROPOSAL_ID_RE, MAX_HUMAN_QUESTIONS, MAX_ASSUMPTIONS, MAX_RISKS, QUESTION_CATEGORIES,
 } from './result.mjs';
 import { validateProposalGraph } from './graph.mjs';
 import { normalizeText } from './task-yaml.mjs';
 
 const TOP_LEVEL_KEYS = new Set([
   'plan_id', 'result', 'goal_summary', 'assumptions', 'risks', 'tasks', 'human_questions',
+  'human_question_categories',
 ]);
 const TASK_KEYS = new Set([
   'proposal_id', 'title', 'request', 'execution', 'depends_on', 'stop_condition', 'acceptance_criteria',
@@ -114,6 +115,17 @@ export function validatePlannerResult(raw, { planId, config, existingTasks = [] 
   const assumptions = stringList(raw.assumptions ?? [], 'assumptions', MAX_ASSUMPTIONS);
   const risks = stringList(raw.risks ?? [], 'risks', MAX_RISKS);
   const humanQuestions = stringList(raw.human_questions ?? [], 'human_questions', MAX_HUMAN_QUESTIONS);
+  // 분류가 없으면 전부 other — 사람 몫이다. 분류를 지어내지 않는다.
+  let questionCategories = humanQuestions.map(() => 'other');
+  if (raw.human_question_categories !== undefined) {
+    const cats = raw.human_question_categories;
+    if (!Array.isArray(cats)) err('human_question_categories must be an array');
+    else if (cats.length !== humanQuestions.length) err(`human_question_categories has ${cats.length} entries but human_questions has ${humanQuestions.length}`);
+    else {
+      cats.forEach((c, i) => { if (!QUESTION_CATEGORIES.includes(c)) err(`human_question_categories[${i}] "${c}" is unsupported (valid: ${QUESTION_CATEGORIES.join(', ')})`); });
+      if (cats.every((c) => QUESTION_CATEGORIES.includes(c))) questionCategories = [...cats];
+    }
+  }
 
   if (!Array.isArray(raw.tasks)) {
     err('tasks must be an array');
@@ -265,6 +277,7 @@ export function validatePlannerResult(raw, { planId, config, existingTasks = [] 
       assumptions,
       risks,
       human_questions: humanQuestions,
+      human_question_categories: questionCategories,
       tasks: normalized,
     },
   };

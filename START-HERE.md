@@ -263,6 +263,14 @@ continues from the rest. There is no resume flag and none is needed.
 `loopctl execute <TASK>` still exists for running a single Task by hand. Use it
 for debugging, not as the normal Phase flow — do not schedule Tasks yourself.
 
+When the user explicitly wants the fast path ("빠르게", "퀵으로"), use
+`loopctl quick --file phase-prompt/0N-*.md` (or `loopctl quick "<goal>"` for a small
+inline goal). It is the same approval boundary as `start` with the `quick` profile
+from `.loop/project.yaml` applied. Gates and required Verifiers are unchanged.
+`loopctl status` ends with a `NEXT` hint; `latest` names the newest Plan.
+Stops are first seen by Triage (a read-only runtime role that cannot mark DONE); a
+`NEEDS_HUMAN` you see has already been escalated by it.
+
 Do not bypass approval boundaries.
 
 ---

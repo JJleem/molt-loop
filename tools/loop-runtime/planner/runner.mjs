@@ -86,6 +86,8 @@ export async function runPlannerOnce({ goal, goalSource = 'argument', config, on
     cwd: ROOT,
     timeoutMs: timeoutSeconds * 1000,
     model: config.runtime.planner_model,
+    effort: config.runtime.planner_effort ?? null,
+    maxBudgetUsd: config.runtime.max_call_budget_usd ?? null,
     schema: plannerResultSchema(),
     tools: PLANNER_TOOLS,
     deny: PLANNER_DENY,
@@ -152,6 +154,9 @@ export async function runPlannerOnce({ goal, goalSource = 'argument', config, on
     adapter: adapterName,
     adapter_version: availability.version ?? null,
     model: proc.model ?? null,
+    effort_requested: config.runtime.planner_effort ?? null,
+    max_call_budget_usd: config.runtime.max_call_budget_usd ?? null,
+    profile: config.profile ?? null,
 
     started_at: startedAt.toISOString(),
     finished_at: finishedAt.toISOString(),

@@ -35,9 +35,11 @@ export function budgetUsed(taskId) {
   const history = attemptHistory(taskId);
   let plainRetries = 0;
   let hintRetries = 0;
+  let triageRetries = 0;
   for (const h of history) {
     if (h.lineage?.retry_action === 'RETRY') plainRetries += 1;
     if (h.lineage?.retry_action === 'RETRY_WITH_HINT') hintRetries += 1;
+    if (h.lineage?.retry_action === 'RETRY_WITH_TRIAGE') triageRetries += 1;
   }
   // 연속 실패 — 진단이 남아 있는 Attempt를 뒤에서부터 센다. V0에서 DONE은 종단이므로
   // 성공 후 실패가 이어지는 경우는 없고, 사실상 진단된 실패의 개수와 같다.
@@ -51,6 +53,7 @@ export function budgetUsed(taskId) {
     attempts: history.length === 0 ? 0 : Math.max(...history.map((h) => h.attempt)),
     plainRetries,
     hintRetries,
+    triageRetries,
     consecutiveFailures,
     history,
   };
@@ -79,6 +82,14 @@ export function checkRetryBudget({ task, config, action }) {
   const used = budgetUsed(task.id);
   const reasons = [];
   const nextAttempt = used.attempts + 1;
+
+  // Triage 재시도는 판단 예산이다. 결정론적 사다리(max_attempts · consecutive · retry_max)와 별개로 센다.
+  // 무한 루프는 stagnation 감지와 triage 결정 상한이 막는다.
+  if (action === 'RETRY_WITH_TRIAGE') {
+    const cap = config.limits.triage?.max_retries_per_task ?? 0;
+    if (used.triageRetries >= cap) reasons.push(`triage retry budget exhausted (${used.triageRetries}/${cap}) — triage.max_retries_per_task`);
+    return { allowed: reasons.length === 0, reasons, limits, used, nextAttempt };
+  }
 
   if (used.attempts >= limits.max_attempts) {
     reasons.push(`maximum attempts reached (${used.attempts}/${limits.max_attempts})`);

@@ -28,6 +28,8 @@ export const ACTIVE_STATES = ['RUNNING', 'STALE'];
 /** 실행 결과. Task YAML 상태가 아니라 오케스트레이션 결과다. */
 export const EXECUTION_RESULTS = [
   'DONE', 'BLOCKED', 'NEEDS_HUMAN', 'LIMIT_REACHED', 'STALLED', 'INTERRUPTED', 'FAILED',
+  // Triage가 "이 Plan의 나머지를 다시 계획하라"고 결정했다. Task 하나의 결과이며 사람 정지는 아니다.
+  'REPLAN',
 ];
 
 const stamp = (d) => d.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');

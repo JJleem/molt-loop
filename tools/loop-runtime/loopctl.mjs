@@ -6,8 +6,9 @@
 // Gate 실행은 결정론적이며 LLM을 호출하지 않는다. Verifier는 Worker와 분리된 새 invocation이다.
 // REVIEW -> DONE 전이는 Runtime이 만든 Verification Report가 PASS일 때만 일어난다.
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   ROOT, LOOP_DIR, LOCAL_DIR,
   loadAllTasks, isValid, isExample, isAutoDispatchable, isPaused, readyTasks, writeStatus,
@@ -15,7 +16,7 @@ import {
 } from './task-store.mjs';
 import { STATES, TRANSITIONS, WORKER_REQUESTABLE } from './transitions.mjs';
 import { buildContext, writeSnapshot } from './context-builder.mjs';
-import { loadConfig } from './config.mjs';
+import { loadConfig, applyProfile, EFFORT_LEVELS } from './config.mjs';
 import { runWorkerOnce } from './worker/runner.mjs';
 import { detectAll } from './adapters/index.mjs';
 import {
@@ -88,6 +89,25 @@ function requireTask(id) {
     return null;
   }
   return task;
+}
+
+/** --effort 값 검사. provider가 받는 값만 통과시킨다. 잘못된 값은 usage error다. */
+function effortOption(value) {
+  if (!EFFORT_LEVELS.includes(value)) return { error: `--effort must be one of ${EFFORT_LEVELS.join(', ')}` };
+  return { value };
+}
+
+/** --profile 적용. 적용된 항목을 그대로 출력해서 무엇이 바뀌었는지 숨기지 않는다. */
+function applyProfileOption(config, name, { quiet = false } = {}) {
+  const profile = applyProfile(config, name);
+  if (!quiet && profile.name) {
+    console.log(`Profile: ${profile.name}`);
+    for (const a of profile.applied) console.log(`  ${a}`);
+    if (!profile.applied.length) console.log('  (no overrides — the profile is empty)');
+    console.log('  Gates, verifier requirements and approval boundaries are not changed by a profile.');
+    console.log('');
+  }
+  return profile;
 }
 
 function cmdTasks() {
@@ -285,7 +305,7 @@ function printUsage(usage) {
 
 /** run — Task 하나에 대해 Worker를 한 번 실행한다. 재시도하지 않는다. */
 async function cmdRun(id, ...flags) {
-  if (!id) return usageError('usage: loopctl run <TASK> [--adapter <name>] [--timeout <seconds>] [--model <model>]');
+  if (!id) return usageError('usage: loopctl run <TASK> [--adapter <name>] [--timeout <seconds>] [--model <model>] [--effort <level>]');
   const opt = (name) => {
     const i = flags.indexOf(`--${name}`);
     return i === -1 ? null : flags[i + 1];
@@ -302,6 +322,11 @@ async function cmdRun(id, ...flags) {
     config.runtime.worker_timeout_seconds = t;
   }
   if (opt('model')) config.runtime.worker_model = opt('model');
+  if (opt('effort')) {
+    const e = effortOption(opt('effort'));
+    if (e.error) return usageError(e.error);
+    config.runtime.worker_effort = e.value;
+  }
 
   // 1) 실행 자격 + TODO -> IN_PROGRESS + Snapshot (수동/자동이 같은 함수를 쓴다)
   const start = startFirstAttempt({ task, config });
@@ -380,6 +405,11 @@ async function finishWorkerRun({ task, snapshot, config, attempt }) {
 
 /** usage — 이미 기록된 Runtime Envelope의 telemetry를 보여준다. 새 계산도 AI 호출도 하지 않는다. */
 function cmdUsage(ref) {
+  if (ref === 'latest') {
+    const r = resolvePlanRef('latest');
+    if (!r.ok) return fail(r.reason);
+    ref = r.planId;
+  }
   if (!ref || ref === '--all' || ref.startsWith('PLAN-')) {
     let taskIds = null;
     if (ref?.startsWith('PLAN-')) {
@@ -389,13 +419,21 @@ function cmdUsage(ref) {
     }
     const u = usageLedger({ taskIds, planId: taskIds ? ref : null });
     console.log('Recorded usage (includes archived attempts; no AI calls)');
-    for (const stage of ['planner', 'worker', 'gate', 'verifier']) console.log(`  ${stage}: ${(u.stage_ms[stage] / 1000).toFixed(1)}s`);
+    for (const stage of ['planner', 'worker', 'gate', 'verifier', 'triage']) console.log(`  ${stage}: ${(u.stage_ms[stage] / 1000).toFixed(1)}s`);
     console.log(`Known cost: $${u.known_cost_usd.toFixed(4)}; unknown cost: ${u.unknown_cost_invocations} invocation(s)`);
     console.log(`Tokens by category: ${JSON.stringify(u.tokens)}`);
-    console.log(`Human-required stops: ${u.human_stops.length}; retry worker cost (known): $${u.retry_worker_cost_usd_known.toFixed(4)}`);
-    for (const id of [...new Set(u.invocations.map((i) => i.task_id).filter(Boolean))]) {
-      const calls = u.invocations.filter((i) => i.task_id === id);
-      console.log(`  ${id}: ${calls.length} calls, ${(calls.reduce((n, i) => n + (i.duration_ms ?? 0), 0) / 1000).toFixed(1)}s, $${calls.reduce((n, i) => n + (i.provider_cost_usd ?? 0), 0).toFixed(4)} known; retries=${calls.filter((i) => i.stage === 'worker' && i.attempt > 1).length}`);
+    console.log(`Human-required stops: ${u.human_stops.length}; triage decisions: ${u.triage_decisions}; retry worker cost (known): $${u.retry_worker_cost_usd_known.toFixed(4)}`);
+    if (u.human_stops.length > 0) {
+      // 어떤 정지가 실제로 자주 나는가. Triage 메뉴와 한도를 조정할 때 이 표를 본다.
+      const byReason = new Map();
+      for (const s of u.human_stops) byReason.set(s.reason, (byReason.get(s.reason) ?? 0) + 1);
+      console.log('  stops by reason:');
+      for (const [reason, n] of [...byReason.entries()].sort((a, b) => b[1] - a[1])) console.log(`    ${String(n).padStart(3)}  ${reason}`);
+    }
+    const trendIds = [...new Set(u.invocations.map((i) => i.task_id).filter(Boolean))].sort();
+    if (trendIds.length > 0) {
+      console.log('');
+      printTaskTrend(u, trendIds);
     }
     return;
   }
@@ -422,6 +460,47 @@ function cmdUsage(ref) {
 }
 
 const fmtSecs = (ms) => `${(ms / 1000).toFixed(1)}s`;
+
+/**
+ * Task별 비용·토큰 추세. 기록된 Envelope만 집계한다 (OBS-005: Worker 비용이 Task마다 커지는 것을
+ * 사람이 execution-report를 손으로 모아야 보였다). 비용이 없는 호출은 '?'로 표시하고 0으로 세지 않는다.
+ */
+function printTaskTrend(u, taskIds) {
+  const money = (calls) => {
+    const known = calls.filter((i) => Number.isFinite(i.provider_cost_usd));
+    if (calls.length === 0) return '-';
+    const sum = known.reduce((n, i) => n + i.provider_cost_usd, 0).toFixed(4);
+    return known.length === calls.length ? sum : `${sum}?`;
+  };
+  const tok = (calls, field) => {
+    const withField = calls.filter((i) => Number.isFinite(i.tokens?.[field]));
+    return withField.length ? withField.reduce((n, i) => n + i.tokens[field], 0).toLocaleString('en-US') : '-';
+  };
+  const rows = taskIds.map((id) => {
+    const calls = u.invocations.filter((i) => i.task_id === id);
+    const worker = calls.filter((i) => i.stage === 'worker');
+    const verifier = calls.filter((i) => i.stage === 'verifier');
+    const workerKnown = worker.filter((i) => Number.isFinite(i.provider_cost_usd));
+    return {
+      id,
+      worker: money(worker), verifier: money(verifier),
+      workerKnownUsd: workerKnown.length === worker.length && worker.length > 0 ? workerKnown.reduce((n, i) => n + i.provider_cost_usd, 0) : null,
+      calls: String(calls.length),
+      retries: String(worker.filter((i) => i.attempt > 1).length),
+      out: tok(worker, 'output'), cached: tok(worker, 'cached_input'),
+      time: fmtDuration(calls.reduce((n, i) => n + (i.duration_ms ?? 0), 0)),
+    };
+  });
+  let prev = null;
+  for (const r of rows) {
+    r.delta = prev !== null && r.workerKnownUsd !== null && prev > 0 ? `${r.workerKnownUsd >= prev ? '+' : ''}${Math.round(((r.workerKnownUsd - prev) / prev) * 100)}%` : '-';
+    if (r.workerKnownUsd !== null) prev = r.workerKnownUsd;
+  }
+  const cols = [['task', 'id', 20], ['worker$', 'worker', 10], ['vs prev', 'delta', 8], ['verifier$', 'verifier', 10], ['calls', 'calls', 6], ['retries', 'retries', 8], ['worker out tok', 'out', 15], ['worker cached in', 'cached', 17], ['time', 'time', 8]];
+  console.log('Per-task trend (worker cost is what grows; "?" = some calls reported no cost):');
+  console.log(`  ${cols.map(([h, , w]) => h.padEnd(w)).join(' ')}`);
+  for (const r of rows) console.log(`  ${cols.map(([, k, w]) => String(r[k]).padEnd(w)).join(' ')}`);
+}
 
 /**
  * gate — 완료된 Worker Run 하나에 대해 필수 결정론적 Gate를 실행한다.
@@ -562,9 +641,9 @@ function cmdVerifyReady() {
  * Runtime이 REVIEW -> DONE 전이를 수행한다. Verifier는 전이를 요청할 수 없다.
  */
 async function cmdVerify(ref, ...flags) {
-  const USAGE_LINE = 'usage: loopctl verify <RUN-ID|TASK-ID> [--rerun] [--adapter <name>] [--model <model>] [--timeout <seconds>]';
+  const USAGE_LINE = 'usage: loopctl verify <RUN-ID|TASK-ID> [--rerun] [--adapter <name>] [--model <model>] [--timeout <seconds>] [--effort <level>]';
   if (!ref) return usageError(USAGE_LINE);
-  const VALUED = new Set(['--adapter', '--model', '--timeout']);
+  const VALUED = new Set(['--adapter', '--model', '--timeout', '--effort']);
   const opt = (n) => { const i = flags.indexOf(`--${n}`); return i === -1 ? null : flags[i + 1]; };
   for (let i = 0; i < flags.length; i += 1) {
     if (VALUED.has(flags[i])) { i += 1; continue; }
@@ -589,6 +668,11 @@ async function cmdVerify(ref, ...flags) {
     const t = Number(opt('timeout'));
     if (!Number.isInteger(t) || t < 1) return usageError('--timeout must be an integer >= 1 (seconds)');
     config.runtime.verifier_timeout_seconds = t;
+  }
+  if (opt('effort')) {
+    const e = effortOption(opt('effort'));
+    if (e.error) return usageError(e.error);
+    config.runtime.verifier_effort = e.value;
   }
 
   const pre = await stageVerify({ task, run, config, rerun, dryRun: true });
@@ -762,8 +846,27 @@ function cmdStatus() {
   if (isPaused()) console.log(`PAUSE active: ${rel(join(LOCAL_DIR, 'PAUSE'))}`);
   console.log('');
 
+  const section = (title, rows) => {
+    console.log(title);
+    if (rows.length === 0) console.log('  none');
+    else for (const r of rows) console.log(r);
+    console.log('');
+  };
+
+  // 승인 대기 중인 Plan은 Task 운영 상태가 아니다. 목록에서는 한 줄로만 알리고, NEXT 계산에 쓴다.
+  const pendingPlans = listPlans()
+    .map((id) => loadPlan(id))
+    .filter((p) => p.ok && p.report && !p.report.corrupt && p.report.approvable && !p.report.approved);
+
   if (tasks.length === 0) {
     console.log('No tasks in .loop/tasks/.');
+    if (pendingPlans.length > 0) section('UNAPPROVED PLANS', pendingPlans.map((p) => `  ${p.planId.padEnd(24)} ${p.report.task_count} task(s)  — loopctl plan-show ${p.planId}`));
+    const next = nextCommandHint({ tasks, valid: [], readySet: new Set(), verifyReady: [], active: listActiveMarkers(), pendingPlans, broken: [], graphErrors: [] });
+    console.log('');
+    console.log('NEXT');
+    console.log(`  ${next.command}`);
+    if (next.why) console.log(`      ${next.why}`);
+    console.log('');
     return;
   }
 
@@ -792,7 +895,9 @@ function cmdStatus() {
     const moved = task && r.final_task_status && task.data.status !== r.final_task_status
       ? `  [superseded — task is now ${task.data.status}]`
       : '';
-    return `latest execution: ${r.result}  (${r.stop_reason})${origin}${moved}`;
+    const triaged = (r.events ?? []).filter((e) => e.stage === 'triage').map((e) => e.result);
+    const triage = triaged.length ? `  [triage: ${triaged.join(', ')}]` : '';
+    return `latest execution: ${r.result}  (${r.stop_reason})${origin}${moved}${triage}`;
   };
 
   /** 진행 중인 실행. Runtime이 남긴 표식만 읽는다 — 프로세스 테이블을 보지 않는다. */
@@ -855,12 +960,6 @@ function cmdStatus() {
     return lines;
   };
 
-  const section = (title, rows) => {
-    console.log(title);
-    if (rows.length === 0) console.log('  none');
-    else for (const r of rows) console.log(r);
-    console.log('');
-  };
 
   const plain = (t) => {
     const head = `  ${t.id.padEnd(20)} ${oneLine(t.data.request, 52)}`;
@@ -925,10 +1024,6 @@ function cmdStatus() {
   const other = valid.filter((t) => isExample(t) || (t.data.status === 'DROPPED' && !isExample(t)));
   if (other.length > 0) section('DROPPED / EXAMPLE', other.map(plain));
 
-  // 승인 대기 중인 Plan은 Task 운영 상태가 아니다. 한 줄로만 알린다.
-  const pendingPlans = listPlans()
-    .map((id) => loadPlan(id))
-    .filter((p) => p.ok && p.report && !p.report.corrupt && p.report.approvable && !p.report.approved);
   if (pendingPlans.length > 0) {
     section('UNAPPROVED PLANS', pendingPlans.map((p) => `  ${p.planId.padEnd(24)} ${p.report.task_count} task(s)  — loopctl plan-show ${p.planId}`));
   }
@@ -948,6 +1043,53 @@ function cmdStatus() {
     console.log('');
     process.exitCode = 1;
   }
+
+  // 다음에 칠 명령 하나. 기록된 파일 상태에서만 결정론적으로 고른다 — 새 판단도 AI 호출도 없다.
+  const next = nextCommandHint({ tasks, valid, readySet, verifyReady, active, pendingPlans, broken, graphErrors });
+  console.log('NEXT');
+  console.log(`  ${next.command}`);
+  if (next.why) console.log(`      ${next.why}`);
+  console.log('');
+}
+
+/**
+ * 상태로부터 다음 명령을 고른다. 우선순위는 "사람이 먼저 봐야 하는 것"부터다:
+ * 실행 중 → PAUSE → 깨진 Task → 사람이 필요한 정지 → 승인된 Plan의 남은 Task →
+ * Plan 밖의 검증/실행 대기 Task → 승인 대기 Plan → 아무것도 없음.
+ */
+function nextCommandHint({ tasks, valid, readySet, verifyReady, active, pendingPlans, broken, graphErrors }) {
+  const running = active.filter(({ marker }) => classifyActiveMarker(marker).state === 'RUNNING');
+  if (running.length > 0) return { command: 'loopctl status', why: `${running.map((a) => a.taskId).join(', ')} is running; wait, then check again` };
+  if (isPaused()) return { command: `remove ${rel(join(LOCAL_DIR, 'PAUSE'))}`, why: 'PAUSE is active; nothing executes until the file is gone' };
+  if (broken.length > 0) return { command: 'loopctl validate', why: `${broken.length} task file(s) are invalid` };
+  if (graphErrors.length > 0) return { command: 'loopctl validate', why: 'the dependency graph has errors' };
+
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const open = (t) => t && t.data && !['DONE', 'DROPPED'].includes(t.data.status) && !isExample(t);
+  // 사람이 필요한 정지: 기록된 Execution Report가 그렇게 말하고, 그 뒤로 Task가 움직이지 않았을 때.
+  for (const t of valid) {
+    if (!open(t)) continue;
+    const found = latestExecutionFor(t.id);
+    const r = found?.report;
+    if (!r || !['NEEDS_HUMAN', 'BLOCKED', 'STALLED'].includes(r.result)) continue;
+    if (r.final_task_status && t.data.status !== r.final_task_status) continue;
+    return { command: `loopctl diagnose ${t.id}`, why: `latest execution stopped: ${r.result} (${r.stop_reason})` };
+  }
+  // 승인된 Plan 중 남은 Task가 있는 것. 가장 오래된 Plan부터 — Phase 순서가 곧 시간 순서다.
+  const plans = listPlans().slice().reverse();
+  for (const id of plans) {
+    const p = loadPlan(id);
+    const created = p.ok && p.approval && !p.approval.corrupt && Array.isArray(p.approval.created_task_ids) ? p.approval.created_task_ids : [];
+    const remaining = created.filter((tid) => open(byId.get(tid)));
+    if (remaining.length > 0) return { command: `loopctl execute-plan ${id}`, why: `${remaining.length} of ${created.length} task(s) remaining; re-running resumes from them` };
+  }
+  if (verifyReady.length > 0) return { command: `loopctl verify ${verifyReady[0].task.id}`, why: 'gates passed; the independent verifier has not run yet' };
+  const ready = valid.filter((t) => readySet.has(t.id));
+  if (ready.length > 0) return { command: `loopctl execute ${ready[0].id}`, why: `${ready.length} task(s) are READY and belong to no approved plan` };
+  if (pendingPlans.length > 0) return { command: `loopctl plan-show ${pendingPlans[0].planId}`, why: `then loopctl plan-approve ${pendingPlans[0].planId} (or "latest")` };
+  const waiting = valid.filter((t) => open(t));
+  if (waiting.length > 0) return { command: 'loopctl ready', why: `${waiting.length} open task(s) but none is dispatchable; ready shows what each waits on` };
+  return { command: 'loopctl start --file <goal.md>', why: 'nothing is pending; `loopctl quick "<goal>"` is the fast path' };
 }
 
 function cmdVersion() {
@@ -1046,9 +1188,9 @@ function cmdDiagnose(ref) {
  * Gate도 Verifier도 자동으로 부르지 않는다. 그 조합은 Step 7의 몫이다.
  */
 async function cmdRetry(ref, ...flags) {
-  const USAGE_LINE = 'usage: loopctl retry <RUN|TASK> [--adapter <name>] [--timeout <seconds>] [--model <model>]';
+  const USAGE_LINE = 'usage: loopctl retry <RUN|TASK> [--adapter <name>] [--timeout <seconds>] [--model <model>] [--effort <level>]';
   if (!ref) return usageError(USAGE_LINE);
-  const VALUED = new Set(['--adapter', '--model', '--timeout']);
+  const VALUED = new Set(['--adapter', '--model', '--timeout', '--effort']);
   const opt = (n) => { const i = flags.indexOf(`--${n}`); return i === -1 ? null : flags[i + 1]; };
   for (let i = 0; i < flags.length; i += 1) {
     if (VALUED.has(flags[i])) { i += 1; continue; }
@@ -1069,6 +1211,11 @@ async function cmdRetry(ref, ...flags) {
     const t = Number(opt('timeout'));
     if (!Number.isInteger(t) || t < 1) return usageError('--timeout must be an integer >= 1 (seconds)');
     config.runtime.worker_timeout_seconds = t;
+  }
+  if (opt('effort')) {
+    const e = effortOption(opt('effort'));
+    if (e.error) return usageError(e.error);
+    config.runtime.worker_effort = e.value;
   }
 
   const started = startRetryAttempt({ task, run, config });
@@ -1119,9 +1266,9 @@ const fmtDuration = (ms) => {
  * Task 하나만 실행한다. 여러 Task를 훑지 않는다.
  */
 async function cmdExecute(id, ...flags) {
-  const USAGE_LINE = 'usage: loopctl execute <TASK> [--timeout <seconds>] [--adapter <name>] [--model <model>]';
+  const USAGE_LINE = 'usage: loopctl execute <TASK> [--timeout <seconds>] [--adapter <name>] [--model <model>] [--effort <level>] [--profile <name>]';
   if (!id) return usageError(USAGE_LINE);
-  const VALUED = new Set(['--timeout', '--adapter', '--model', '--verifier-adapter', '--verifier-model']);
+  const VALUED = new Set(['--timeout', '--adapter', '--model', '--verifier-adapter', '--verifier-model', '--effort', '--verifier-effort', '--profile']);
   const opt = (n) => { const i = flags.indexOf(`--${n}`); return i === -1 ? null : flags[i + 1]; };
   for (let i = 0; i < flags.length; i += 1) {
     if (VALUED.has(flags[i])) { i += 1; continue; }
@@ -1137,10 +1284,18 @@ async function cmdExecute(id, ...flags) {
   }
 
   const config = loadConfig();
+  // 프로필을 먼저 적용하고 개별 플래그가 그 위를 덮는다. 명시적 플래그가 항상 이긴다.
+  if (opt('profile')) { try { applyProfileOption(config, opt('profile')); } catch (e) { return fail(e.message); } }
   if (opt('adapter')) config.runtime.worker_adapter = opt('adapter');
   if (opt('model')) config.runtime.worker_model = opt('model');
   if (opt('verifier-adapter')) config.runtime.verifier_adapter = opt('verifier-adapter');
   if (opt('verifier-model')) config.runtime.verifier_model = opt('verifier-model');
+  for (const [flag, key] of [['effort', 'worker_effort'], ['verifier-effort', 'verifier_effort']]) {
+    if (!opt(flag)) continue;
+    const e = effortOption(opt(flag));
+    if (e.error) return usageError(e.error.replace('--effort', `--${flag}`));
+    config.runtime[key] = e.value;
+  }
   let deadlineMs = null;
   if (opt('timeout')) {
     const t = Number(opt('timeout'));
@@ -1257,26 +1412,97 @@ async function cmdResume(ref, ...flags) {
   return cmdExecute(resolved.run.taskId);
 }
 
-async function cmdStart(...args) {
-  const files = [];
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] !== '--file' || !args[i + 1] || args[i + 1].startsWith('--')) return usageError('usage: loopctl start --file <goal.md> [--file <next-phase.md> ...]');
-    files.push(args[++i]);
-  }
-  if (!files.length) return usageError('usage: loopctl start --file <goal.md> [--file <next-phase.md> ...]');
+/** start와 quick이 공유하는 실행부. 명령 자체가 지정한 목표 파일들에 대한 범위 승인이다. */
+async function runStartWorkflow({ files, config }) {
   let interrupted = false;
   const stop = () => { interrupted = true; };
   process.on('SIGINT', stop);
   try {
-    const out = await runWorkflow({ files, config: loadConfig(), isInterrupted: () => interrupted, emit: (e) => {
+    const out = await runWorkflow({ files, config, isInterrupted: () => interrupted, emit: (e) => {
       if (e.event === 'phase') console.log(`Phase: ${e.file} (${e.plan_id})`);
       if (e.event === 'task-start' || e.event === 'task-end') console.log(`${e.task_id}: ${e.result ?? 'starting'}`);
+      if (e.event === 'stage' && e.stage === 'triage') console.log(`  [Triage] ${e.result}${e.detail ? ` — ${e.detail}` : ''}`);
+      if (e.event === 'triage') console.log(`[Triage/${e.kind}] ${e.decision}${e.detail ? ` — ${e.detail}` : ''}`);
+      if (e.event === 'replan') console.log(`Replan ${e.attempt}: ${e.superseded} -> planning again (dropped: ${e.dropped.join(', ') || 'none'})`);
+      if (e.event === 'answered') console.log(`Planner questions answered by triage; planning again (${e.superseded})`);
     } });
     console.log(`Workflow: ${out.result}\nRecord: ${rel(out.path)}`);
     if (out.detail) console.log(out.detail);
     if (out.plan_id) console.log(`Inspect: loopctl plan-show ${out.plan_id}`);
-    if (out.result !== 'DONE') process.exitCode = 1;
+    if (out.result !== 'DONE') {
+      process.exitCode = 1;
+      console.log('Next: loopctl status   (shows the next command)');
+    }
   } finally { process.off('SIGINT', stop); }
+}
+
+/** start · quick 공통 인자 파싱. --file은 여러 번, 인라인 목표는 quick만 받는다. */
+function parseGoalArgs(args, { allowInline, usage }) {
+  const files = [];
+  const positional = [];
+  const opts = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--file' || a === '--profile' || a === '--effort') {
+      if (!args[i + 1] || args[i + 1].startsWith('--')) return { error: `${a} requires a value\n${usage}` };
+      if (a === '--file') files.push(args[++i]);
+      else opts[a.slice(2)] = args[++i];
+      continue;
+    }
+    if (a.startsWith('--')) return { error: `unknown option: ${a}\n${usage}` };
+    if (!allowInline) return { error: usage };
+    positional.push(a);
+  }
+  const goal = positional.join(' ').trim();
+  if (goal && files.length) return { error: `give either a quoted goal or --file, not both\n${usage}` };
+  if (!goal && !files.length) return { error: usage };
+  return { files, goal, opts };
+}
+
+async function cmdStart(...args) {
+  const USAGE_LINE = 'usage: loopctl start --file <goal.md> [--file <next-phase.md> ...] [--profile <name>] [--effort <level>]';
+  const parsed = parseGoalArgs(args, { allowInline: false, usage: USAGE_LINE });
+  if (parsed.error) return usageError(parsed.error);
+  const config = loadConfig();
+  if (parsed.opts.profile) { try { applyProfileOption(config, parsed.opts.profile); } catch (e) { return fail(e.message); } }
+  if (parsed.opts.effort) {
+    const e = effortOption(parsed.opts.effort);
+    if (e.error) return usageError(e.error);
+    config.runtime.worker_effort = e.value;
+  }
+  return runStartWorkflow({ files: parsed.files, config });
+}
+
+/**
+ * quick — 빠르게 가야 할 때. `start`와 같은 승인 경계(명령 자체가 범위 승인)를 쓰되
+ * 설정의 `quick` 프로필(낮은 effort · 작은 Plan · 호출당 상한 등)을 적용한다.
+ *
+ * Gate · Verifier 요구 · Runtime 판정은 그대로다. 빨라지는 것은 AI 호출의 크기이지 검증의 깊이가 아니다.
+ * 인라인 목표는 `.loop-local/goals/`에 파일로 남긴다 — 범위 기록이 파일 경로와 내용 해시로 식별되기 때문이다.
+ */
+async function cmdQuick(...args) {
+  const USAGE_LINE = 'usage: loopctl quick "<GOAL>"  |  loopctl quick --file <goal.md> [--file <next.md> ...]   [--profile <name>] [--effort <level>]';
+  const parsed = parseGoalArgs(args, { allowInline: true, usage: USAGE_LINE });
+  if (parsed.error) return usageError(parsed.error);
+  // 설정과 프로필을 먼저 확인한다. 거부되는 명령은 파일 하나도 남기지 않는다.
+  const config = loadConfig();
+  try { applyProfileOption(config, parsed.opts.profile ?? 'quick'); } catch (e) { return fail(`${e.message}\n  quick needs a profile; add runtime.profiles.quick to .loop/project.yaml or pass --profile <name>.`); }
+  if (parsed.opts.effort) {
+    const e = effortOption(parsed.opts.effort);
+    if (e.error) return usageError(e.error);
+    config.runtime.worker_effort = e.value;
+  }
+  const files = [...parsed.files];
+  if (parsed.goal) {
+    const dir = join(LOCAL_DIR, 'goals');
+    mkdirSync(dir, { recursive: true });
+    const id = createHash('sha256').update(parsed.goal).digest('hex').slice(0, 16);
+    const goalPath = join(dir, `quick-${id}.md`);
+    if (!existsSync(goalPath)) writeFileSync(goalPath, `${parsed.goal}\n`, 'utf8');
+    console.log(`Goal file: ${rel(goalPath)}`);
+    files.push(goalPath);
+  }
+  return runStartWorkflow({ files, config });
 }
 
 /**
@@ -1289,9 +1515,9 @@ async function cmdStart(...args) {
  * 같은 명령을 다시 실행하면 남은 Task부터 이어간다 — Task 상태가 곧 재시작 지점이다.
  */
 async function cmdExecutePlan(ref, ...flags) {
-  const USAGE_LINE = 'usage: loopctl execute-plan <PLAN> [--timeout <seconds>] [--adapter <name>] [--model <model>]';
+  const USAGE_LINE = 'usage: loopctl execute-plan <PLAN|latest> [--timeout <seconds>] [--adapter <name>] [--model <model>] [--effort <level>] [--profile <name>]';
   if (!ref) return usageError(USAGE_LINE);
-  const VALUED = new Set(['--timeout', '--adapter', '--model', '--verifier-adapter', '--verifier-model']);
+  const VALUED = new Set(['--timeout', '--adapter', '--model', '--verifier-adapter', '--verifier-model', '--effort', '--verifier-effort', '--profile']);
   const opt = (n) => { const i = flags.indexOf(`--${n}`); return i === -1 ? null : flags[i + 1]; };
   for (let i = 0; i < flags.length; i += 1) {
     if (VALUED.has(flags[i])) { i += 1; continue; }
@@ -1308,10 +1534,17 @@ async function cmdExecutePlan(ref, ...flags) {
   }
 
   const config = loadConfig();
+  if (opt('profile')) { try { applyProfileOption(config, opt('profile')); } catch (e) { return fail(e.message); } }
   if (opt('adapter')) config.runtime.worker_adapter = opt('adapter');
   if (opt('model')) config.runtime.worker_model = opt('model');
   if (opt('verifier-adapter')) config.runtime.verifier_adapter = opt('verifier-adapter');
   if (opt('verifier-model')) config.runtime.verifier_model = opt('verifier-model');
+  for (const [flag, key] of [['effort', 'worker_effort'], ['verifier-effort', 'verifier_effort']]) {
+    if (!opt(flag)) continue;
+    const e = effortOption(opt(flag));
+    if (e.error) return usageError(e.error.replace('--effort', `--${flag}`));
+    config.runtime[key] = e.value;
+  }
   let deadlineMs = null;
   if (opt('timeout')) {
     const t = Number(opt('timeout'));
@@ -1379,6 +1612,7 @@ async function cmdExecutePlan(ref, ...flags) {
   console.log(`Plan Execution: ${written.report.plan_execution_id}`);
   console.log(`Plan Result: ${run.result}   stop_reason: ${run.stopReason}`);
   if (run.detail) console.log(`  ${run.detail}`);
+  if (run.result === 'REPLAN') console.log('  Triage asked for a replan. `loopctl start --file <goal.md>` (or `quick`) performs it under that goal\'s authority; execute-plan alone does not replan.');
   console.log(`Duration: ${fmtDuration(written.report.duration_ms)}`);
   console.log('');
   console.log('Tasks executed this run:');
@@ -1490,8 +1724,8 @@ function printPlanUsage(usage) {
 
 /** plan — Goal 하나를 Task 제안으로 분해한다. **이 단계만 AI를 호출한다.** Task를 만들지 않는다. */
 async function cmdPlan(...argv) {
-  const USAGE_LINE = 'usage: loopctl plan "<GOAL>" [--file <path>] [--adapter <name>] [--model <model>] [--timeout <seconds>]';
-  const VALUED = new Set(['--file', '--adapter', '--model', '--timeout']);
+  const USAGE_LINE = 'usage: loopctl plan "<GOAL>" [--file <path>] [--adapter <name>] [--model <model>] [--timeout <seconds>] [--effort <level>] [--profile <name>]';
+  const VALUED = new Set(['--file', '--adapter', '--model', '--timeout', '--effort', '--profile']);
   const positional = [];
   const opts = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -1520,12 +1754,18 @@ async function cmdPlan(...argv) {
   if (goal === '') return usageError(USAGE_LINE);
 
   const config = loadConfig();
+  if (opts.profile) { try { applyProfileOption(config, opts.profile); } catch (e) { return fail(e.message); } }
   if (opts.adapter) config.runtime.planner_adapter = opts.adapter;
   if (opts.model) config.runtime.planner_model = opts.model;
   if (opts.timeout) {
     const t = Number(opts.timeout);
     if (!Number.isInteger(t) || t < 1) return usageError('--timeout must be an integer >= 1 (seconds)');
     config.runtime.planner_timeout_seconds = t;
+  }
+  if (opts.effort) {
+    const e = effortOption(opts.effort);
+    if (e.error) return usageError(e.error);
+    config.runtime.planner_effort = e.value;
   }
 
   let outcome;
@@ -1838,7 +2078,7 @@ function cmdDoctor() {
   const required = [
     '.loop/DESIGN.md', '.loop/KERNEL.md', '.loop/project.yaml',
     '.loop/skills/impl.md', '.loop/skills/verifier.md', '.loop/policies/limits.yaml',
-    '.loop/skills/planner.md',
+    '.loop/skills/planner.md', '.loop/skills/triage.md',
     '.loop/tasks', '.loop/evidence',
     '.loop-local/runs', '.loop-local/leases', '.loop-local/staging', '.loop-local/plans',
   ];
@@ -1865,7 +2105,7 @@ function cmdDoctor() {
   if (reportErrors(tasks) || gateProblems || graphProblems || !ok) process.exitCode = 1;
 }
 
-const RUNTIME_VERSION = 'Loop Runtime V0.2';
+const RUNTIME_VERSION = 'Loop Runtime V0.4';
 
 const VERSION_TEXT = [
   RUNTIME_VERSION,
@@ -1881,66 +2121,63 @@ const HELP = `${RUNTIME_VERSION}
 Usage:
   loopctl <command> [arguments]
 
-Inspect
-  status                      전체 상태 요약 (읽기 전용 · AI 호출 없음)
-  doctor                      구조 점검
-  tasks                       Task 목록
-  show <TASK>                 Task 상세
-  ready                       Worker 실행 준비된 Task
-  verify-ready                Verifier 대기 중인 Task/Run
-  gates                       설정된 Gate (실행하지 않음)
-  adapters                    Provider Adapter 사용 가능 여부
+Daily (this is usually all you need)
+  quick "<GOAL>" | --file <goal.md>
+                              빠르게: 계획·승인·실행을 한 번에, 설정의 quick 프로필 적용
+                              (낮은 effort · 작은 Plan · 호출당 상한). Gate·Verifier는 그대로.
+  start --file <goal.md>      지정한 목표의 계획·승인·실행을 한 번에 (명시적 범위 승인)
+                              여러 --file로 Phase 순서 지정; 같은 명령으로 재개  --profile --effort
+  status                      전체 상태 + 다음에 칠 명령 (읽기 전용 · AI 호출 없음)
+  resume <RUN|TASK|PLAN>      중단 단계부터 재개; --rerun-gates로 현재 변경을 인정하고 재검사
+  usage --all | <PLAN>        단계별 시간 · 누적 비용 · Task별 추세  (AI 호출 없음)
+  diagnose <RUN|TASK>         멈춘 이유와 Failure Memo (읽기 전용 · AI 호출 없음)
 
-Plan
+Plan, step by step (PLAN 자리에 "latest" 사용 가능)
   plan "<GOAL>"               Goal -> Task 제안 (읽기 전용 · AI 호출 1회 · Task를 만들지 않음)
-                              --file --adapter --model --timeout
+                              --file --adapter --model --timeout --effort --profile
   plan-show <PLAN>            기록된 Plan 열람            (AI 호출 없음)
   plans                       Plan 목록                   (AI 호출 없음)
   plan-approve <PLAN>         승인 -> canonical Task 생성  (AI 호출 없음 · 실행하지 않음)
+  execute-plan <PLAN>         승인된 Plan 실행·재개 (설정에 따라 Worker 격리·병렬화)
+                              --timeout --adapter --model --effort --profile
 
-Execute
-  start --file <goal.md>      지정한 목표의 계획·승인·실행을 한 번에 (명시적 범위 승인)
-                              여러 --file로 Phase 순서 지정; 같은 명령으로 재개
-  resume <RUN|TASK|PLAN>      중단 단계부터 재개; --rerun-gates로 현재 변경을 인정하고 재검사
-  run <TASK>                  Worker 1회 실행         --adapter --timeout --model
+Single task (debugging · manual control)
+  run <TASK>                  Worker 1회 실행         --adapter --timeout --model --effort
   gate <RUN|TASK>             결정론적 Gate 실행       --rerun            (AI 호출 없음)
-  verify <RUN|TASK>           독립 Verifier 1회 실행   --rerun --adapter --model --timeout
-  retry <RUN|TASK>            진단 기반 Worker 재시도 1회  --adapter --timeout --model
-  execute <TASK>              DONE 또는 정지 조건까지 Task 루프 실행  --timeout --adapter --model
+  verify <RUN|TASK>           독립 Verifier 1회 실행   --rerun --adapter --model --timeout --effort
+  retry <RUN|TASK>            진단 기반 Worker 재시도 1회  --adapter --timeout --model --effort
+  execute <TASK>              DONE 또는 정지 조건까지 Task 루프 실행  --timeout --adapter --model --effort --profile
   self-check [<gate> ...]     설정된 Gate 명령만 참고용으로 실행   (AI 호출 없음 · 판정 아님)
-  execute-plan <PLAN>         승인된 Plan 실행·재개 (설정에 따라 Worker 격리·병렬화)  --timeout --adapter --model
-                              (오케스트레이션 판단은 결정론적 · 추가 AI 호출 없음)
 
-Inspect Runs
-  diagnose <RUN|TASK>         실패 진단 · Failure Memo (읽기 전용 · AI 호출 없음)
+Inspect
+  doctor                      구조 점검
+  tasks · show <TASK> · ready · verify-ready
+  gates · adapters            설정된 Gate · Provider Adapter 사용 가능 여부
   execution <EXEC|TASK>       기록된 Execution Report
-  usage [RUN|TASK|PLAN|--all]  개별 Worker telemetry 또는 전체 단계·비용·토큰 집계
   verification <RUN|TASK>     기록된 Verification Report
+  usage <RUN|TASK>            개별 Worker telemetry
 
 Low-level
   validate                    Task 전체 검증
   transition <TASK> <STATE>   Runtime을 통한 유일한 상태 변경 경로
   context <TASK>              Worker Context 출력 (실행하지 않음)
   snapshot <TASK>             Run snapshot 생성
-
-Other
-  help                        이 도움말
-  version                     Runtime 버전
+  help · version
 
   states: ${STATES.join(' · ')}
   worker-requestable: ${WORKER_REQUESTABLE.join(' · ')} (요청일 뿐, 적용은 Runtime이 결정)
   exit: 0 성공 · 1 작업 실패/거부 · 2 잘못된 사용법
+  effort: ${EFFORT_LEVELS.join(' · ')}  (provider CLI의 --effort; null이면 CLI 기본값)
+  profiles: .loop/project.yaml의 runtime.profiles.<name>. 속도·비용 값만 바꾼다.
 
   Run ID가 정본이다. Task ID는 Runtime이 결정론적으로 해석할 때만 쓸 수 있는 편의 입력이다.
   execute는 Worker -> Gate -> Verifier -> Diagnose -> Retry를 자동으로 잇는다.
-  execute-plan은 최종 검증을 순서대로 수행하며, 격리된 독립 Worker는 병렬 실행할 수 있다.
   사람이 필요한 정지에서 즉시 멈추고, 다시 실행하면 남은 Task부터 이어간다.
   계획은 승인 전까지 Task를 만들지 않고, 승인은 Task를 실행하지 않는다.
-  선행 Task(depends_on)가 DONE이 아니면 그 Task는 READY가 아니며 run/execute가 거부된다.
-  낮은 수준 명령은 디버깅·수동 제어용으로 그대로 남아 있다. Task 하나만 실행한다.`;
+  quick/start는 명령 자체가 지정한 목표에 대한 승인이다. 다른 파일로 범위를 넓히지 않는다.`;
 
 const commands = {
-  start: cmdStart, resume: cmdResume,
+  start: cmdStart, quick: cmdQuick, resume: cmdResume,
   status: cmdStatus, doctor: cmdDoctor,
   tasks: cmdTasks, show: cmdShow, ready: cmdReady, 'verify-ready': cmdVerifyReady,
   gates: cmdGates, adapters: cmdAdapters, 'self-check': cmdSelfCheck,
@@ -1967,7 +2204,7 @@ if (!run) {
 } else {
   let release;
   try {
-    if (new Set(['plan', 'plan-approve', 'run', 'gate', 'verify', 'retry', 'execute', 'execute-plan', 'transition', 'snapshot', 'resume', 'start']).has(cmd)) release = acquireOperationLock(cmd);
+    if (new Set(['plan', 'plan-approve', 'run', 'gate', 'verify', 'retry', 'execute', 'execute-plan', 'transition', 'snapshot', 'resume', 'start', 'quick']).has(cmd)) release = acquireOperationLock(cmd);
     if (args.includes('--model') && cmd !== 'plan') loadConfig().workerModelExplicit = true;
     await run(...args);
   } catch (e) {

@@ -38,6 +38,7 @@ export function buildPlanReport({
     assumptions: validation.result?.assumptions ?? [],
     risks: validation.result?.risks ?? [],
     human_questions: validation.result?.human_questions ?? [],
+    human_question_categories: validation.result?.human_question_categories ?? [],
 
     task_count: proposed.length,
     proposal_order: order,

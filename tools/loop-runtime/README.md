@@ -1,8 +1,13 @@
-# loop-runtime (V0.2)
+# loop-runtime (V0.4)
 
 현재 운영 명령과 설정은 [Runtime 사용법](../../docs/RUNTIME-USAGE.md)에 정리했다.
+V0.4는 Triage를 추가한다 — 정지 지점에서 사람 대신 먼저 보는 읽기 전용 판단 역할(`recovery/triage.mjs`,
+`.loop/skills/triage.md`). Runtime이 준 메뉴에서만 고르고 DONE은 못 만든다. REPLAN · ANSWER는 `start`/`quick`
+아래에서만 실행된다. Planner 질문에 `human_question_categories`가 생겼다.
+V0.3은 `quick`(빠른 프로필 실행), `runtime.profiles`, provider `--effort`/`--max-budget-usd` 전달,
+Plan 참조 `latest`, `status`의 `NEXT` 힌트, `usage --all`의 Task별 추세 표를 추가한다.
 V0.2는 Task 자료, 누적 예산 검사, resume, Gate-only 완료, 명시적 Phase 자동 진행,
-격리 Worker와 제한 병렬 Gate를 추가한다. 아래 V0/V0.1 단계별 설명 중 “아직 없음”은
+격리 Worker와 제한 병렬 Gate를 추가했다. 아래 V0/V0.1 단계별 설명 중 “아직 없음”은
 해당 단계 당시의 기록이다. 현재 지원 여부는 위 문서와 `loopctl help`를 기준으로 한다.
 
 Loop Engineering Runtime의 구현. 설계 원본은 `.loop/DESIGN.md`이며, Worker에게는 전달되지 않는다.

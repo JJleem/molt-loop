@@ -136,6 +136,8 @@ export async function runWorkerOnce({ task, snapshot, config, attempt = 1 }) {
     cwd: ROOT,
     timeoutMs,
     model: config.runtime.worker_model,
+    effort: config.runtime.worker_effort ?? null,
+    maxBudgetUsd: config.runtime.max_call_budget_usd ?? null,
     resultPath,
     deny: workerDenyRules(task.id),
     allow: workerAllowRules(),
@@ -189,6 +191,10 @@ export async function runWorkerOnce({ task, snapshot, config, attempt = 1 }) {
     adapter: adapterName,
     adapter_version: availability.version ?? null,
     model: proc.model ?? null,
+    // 요청한 값이다. provider가 effort를 되돌려주지 않으므로 관찰값이 아니라 요청값으로 기록한다.
+    effort_requested: config.runtime.worker_effort ?? null,
+    max_call_budget_usd: config.runtime.max_call_budget_usd ?? null,
+    profile: config.profile ?? null,
     attempt,
     lineage: snapshot.manifest?.lineage ?? null,
 

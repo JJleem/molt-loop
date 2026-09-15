@@ -5,6 +5,9 @@
 > CI-002(재개), CI-004(비용 집계), CI-005(호출 사이 예산 검사)를 구현했다.
 > Worker 격리·제한 병렬화, Task 자료, 명시적 다중 Phase 실행도 추가했다.
 > 이는 새로운 실사용 비용 측정이 아니며, 실제 절약률은 아직 측정하지 않았다.
+>
+> V0.3 (2026-09-15): `quick`·프로필·effort·호출당 상한·`latest`·`NEXT`·Task별 추세 표.
+> 근거와 실측은 아래 **V0.3 — 빠른 경로와 운영 편의** 절에 있다. 절약률은 여전히 미측정이다.
 
 > **이 문서는 Runtime 설계 근거(design provenance)다. 현재 프로젝트의 상태가 아니다.**
 >
@@ -1045,6 +1048,110 @@ CI 번호는 부여하지 않았다 — canonical 쪽에서도 아직 부여되�
 ---
 
 
+# V0.3 — 빠른 경로와 운영 편의
+
+**Date:** 2026-09-15
+
+**계기.** 사용자의 요청 두 가지: "더 쉽고 간편하게", "빠르게 가야 할 때를 대비한 퀵 모드".
+Runtime 관찰(OBS-005, CI-004)과 Ideas 목록(온보딩 마찰, Plan ID 복붙)에 이미 근거가 있던 항목만 골랐다.
+
+Runtime 회귀 스위트: **199 tests / 199 pass / 0 fail** (변경 전 181 → 새 회귀 18건, `test/quick-ux.test.mjs`).
+`loopctl doctor` exit 0. 제품 코드는 이 저장소에 없다.
+
+## 1. `loopctl quick` 과 `runtime.profiles`
+
+`start`와 같은 승인 경계(명령 자체가 지정 목표의 승인)에 설정의 `quick` 프로필을 적용한다.
+프로필은 속도·비용 키만 받는다(모델 · effort · timeout · 호출당 상한 · `goal_verification` · `max_tasks_per_plan`).
+다른 키는 설정 로드가 실패한다. Gate · `requires_verifier` · 정지 한도는 바꿀 수 없다.
+인라인 목표는 `.loop-local/goals/quick-<hash>.md`로 남겨 범위 기록의 기준으로 삼는다.
+적용된 값은 명령 출력과 Envelope(`profile`, `effort_requested`)에 남는다.
+
+**설계 판단.** "빠르게"를 검증 약화가 아니라 **AI 호출의 크기**로 정의했다. 완료 판정을 AI에게 맡기지
+않는다는 Runtime 원칙과 충돌하지 않는 유일한 선택이다. 실제 속도·비용 차이는 미측정이다.
+
+## 2. provider `--effort` / `--max-budget-usd` 전달 (실측)
+
+**확인 방법.** Claude Code 2.1.272, `--print --output-format json --no-session-persistence --tools ""`,
+같은 1-단어 프롬프트로 2회 호출. 총 비용 약 $0.10.
+
+| 호출 | 플래그 | exit | `is_error` | `terminal_reason` | 보고 비용 |
+|---|---|---|---|---|---|
+| 1 | `--effort low --max-budget-usd 0.05` | 1 | true | `budget_exhausted` | $0.0899 |
+| 2 | `--effort low --max-budget-usd 1` | 0 | false | `completed` | $0.0114 |
+
+**관찰된 사실.** (a) 두 플래그 모두 print 모드에서 수용된다. (b) 상한은 호출 **뒤에** 검사된다 — 1회차는
+상한 0.05를 넘긴 0.0899가 청구된 뒤 실패로 끝났다. (c) 응답 payload에 effort 값은 없다. 그래서 Envelope는
+`effort_requested`(요청값)로 기록한다. (d) 1회차의 4,440 cache-creation 토큰 대비 2회차 463은 같은 프롬프트의
+캐시 재사용으로 보인다 — **추정이며 검증하지 않았다.**
+
+**한계.** 실시간 hard cap이 아니다. README의 "아직 없는 것"을 그렇게 고쳤다. effort 수준별 품질·비용 차이는 측정하지 않았다.
+
+## 3. `usage --all` Task별 추세 표 (OBS-005 · CI-004)
+
+이미 기록돼 있던 Envelope만 집계한다. Worker 비용, 직전 Task 대비 증감, Verifier 비용, 호출·재시도, 토큰, 시간.
+비용 미보고 호출은 `?`로 표시하고 0으로 세지 않는다. CI-004의 근거 수정("순번이 아니라 Task 크기 대비")은
+표가 자동으로 답하지 못한다 — 사람이 Task 크기와 함께 읽어야 한다.
+
+## 4. `latest` 와 `status`의 `NEXT`
+
+Plan ID 복붙과 "다음에 뭘 치지"가 Ideas에 적혀 있던 온보딩 마찰이다. `NEXT`는 기록된 파일 상태에서만
+결정론적으로 고른다(실행 중 → PAUSE → 깨진 Task → 사람 정지 → 승인된 Plan 잔여 → Plan 밖 Task → 승인 대기 Plan → 없음).
+AI 호출도 새 판단 artifact도 없다.
+
+## 5. 문서
+
+`docs/QUICKSTART.md` 한 장을 추가하고 README·RUNTIME-USAGE·START-HERE·CLAUDE.local.md를 그에 맞췄다.
+`loopctl help`는 "Daily" 절을 맨 위로 올렸다.
+
+## 하지 않은 것
+
+- 격리 Worker의 파일 복사 비용 최적화 — 실측이 없어 손대지 않았다. `usage --all`의 stage 시간으로 먼저 잰다.
+- effort/quick 프로필의 실제 절약률 측정 — 실제 Phase를 같은 Goal·모델로 전후 비교해야 한다.
+- 자동 replan/decompose, 호출 중 비용 차단 — 여전히 범위 밖이다.
+
+---
+
+# V0.4 — Triage: 사람을 부르기 전에 먼저 보는 층
+
+**Date:** 2026-09-15
+
+**계기.** 사용자 관찰: "정말 사람이 봐야 하는 정지도 있지만, 돌려 보니 다른 agent가 봐도 됐을 정지가 많았다."
+코드에서 사람을 부르는 지점을 전부 뽑아 분류한 결과 대부분이 설계 원칙이 아니라 "안전을 모를 때 멈춘다"는
+보수적 기본값이었다. Phase 1 실측의 유일한 사람 정지(OBS-003)도 그 유형이었다.
+
+Runtime 회귀 스위트: **218 tests / 218 pass / 0 fail** (V0.3 199 → 새 회귀 19건, `test/triage.test.mjs`).
+
+## 설계
+
+- Triage는 네 번째 격리 호출이다. Verifier와 같은 읽기 전용 도구 · 구조화 출력 · 실행 전후 지문 대조.
+- **정지 지점에서만** 호출된다. 성공하는 Task에는 비용이 0이다.
+- Runtime이 정지 사유별로 **메뉴**를 만들고 Triage는 거기서만 고른다. 메뉴는 사람이 CLI로 할 수 있는 복구 행동과 같다.
+  `RERUN_GATES` · `RERUN_VERIFIER` · `RETRY_WITH_LESSON` · `UNBLOCK` · `REPLAN` · `ANSWER` · `ESCALATE`. **DONE은 없다.**
+- 메뉴가 `ESCALATE`뿐이면 AI를 부르지 않는다(정책 위반 · 권한 위반 · 예산 · PAUSE · 보안/비가역/제품 질문).
+- 결정마다 `evidence_basis` · `evidence_refs`가 필수이고 Runtime이 경로 존재를 확인한다. 메뉴 밖 · 없는 경로 · 결과 없음 → `ESCALATE`.
+- 판단 예산(`limits.yaml` `triage:`)은 결정론적 사다리와 별개다. Task당 결정 2, 그중 재시도 1, Phase당 replan 1 · answer 1.
+- REPLAN · ANSWER는 `start`/`quick`(workflow) 아래에서만 실행된다 — 그 명령이 Goal에 대한 계획 권한이기 때문이다.
+  REPLAN은 남은 Task를 DROPPED로 내리고(DONE 유지) 실패 맥락을 Goal에 붙여 다시 계획한다.
+- Planner 질문에 `human_question_categories`(`spec` · `implementation` · `security` · `irreversible` · `product` · `other`)를
+  붙였다. Triage는 앞의 둘만 답할 수 있고, 분류가 없는 질문(이전 Planner 출력)은 사람 몫이다.
+- 기본값을 바꿨다: `recovery_paths`에 문서 경로 4개(OBS-003 직접 대응), `max_attempts` 3→4, `hint_retry_max` 1→2.
+  `usage --all`에 `stops by reason`을 넣어 다음 조정을 실측으로 하게 했다.
+
+## 사용자 결정
+
+"설정에서 켜는 게 아니라 그냥 넣고 싶다" → 기본으로 켜져 있다. 섹션을 지우거나 `--profile manual`로 끈다.
+"잘만 되면 휴먼 리뷰 없이 끝날 수도 있나" → 루프 안에서는 그렇다. 사람은 두 끝(스펙 · 최종 인수)에 남고,
+관찰되지 않은 실행이 필요한 AC는 Triage가 있어도 PASS하지 못한다. Triage가 틀려도 결과는 잘못된 DONE이 아니라 비용이다.
+
+## 하지 않은 것 · 미측정
+
+- 실제 provider로 Triage를 돌린 기록은 아직 없다. 메뉴 · 근거 검증 · 예산은 mock 회귀로만 확인했다.
+  첫 실제 Phase에서 `usage --all`의 `triage decisions`와 `stops by reason`을 보고 메뉴와 한도를 조정한다.
+- Gate/Verifier를 스냅샷 복사본에서 돌리는 구조 변경(사람 편집이 검증을 무효화하지 않게)은 하지 않았다.
+- 벽시계 시간: Task는 여전히 순차 검증이다. 격리 Worker가 켜져 있어도 Gate/Verifier는 원본 트리에서 직렬로 돈다.
+
+---
+
 # Candidate Improvements
 
 실제 사용 사례가 충분히 쌓인 항목만 이 표로 승격한다.
@@ -1054,8 +1161,8 @@ CI 번호는 부여하지 않았다 — canonical 쪽에서도 아직 부여되�
 | CI-001 | 정지 사유에 subject diff(ADDED/REMOVED/CHANGED 경로) 포함 | OBS-003 | High | CANDIDATE |
 | CI-002 | `loopctl resume <RUN>` — gate 재실행 → verify 복구 경로 | OBS-003, OBS-004 | Medium | CANDIDATE |
 | CI-003 | Worker Context에 실제 capability(명령 실행/네트워크/evidence 쓰기) 선언 | OBS-002 (Phase 1 전체 8/8), OBS-005, OBS-007, OBS-008 | High | **IMPLEMENTED** (V0.1 §1·§2 — Result Protocol의 RUNTIME CAPABILITIES 절) |
-| CI-004 | `loopctl usage`에 Task 간 비용/토큰 추세 표시 (근거 수정: 순번이 아니라 Task 크기 대비 비용) | OBS-005 (Phase 1 실측으로 순번 가설 반증) | Medium | CANDIDATE |
-| CI-005 | `limits.yaml`에 Worker 비용/토큰 상한 (현재는 실패 횟수만) | OBS-005 | Low | CANDIDATE |
+| CI-004 | `loopctl usage`에 Task 간 비용/토큰 추세 표시 (근거 수정: 순번이 아니라 Task 크기 대비 비용) | OBS-005 (Phase 1 실측으로 순번 가설 반증) | Medium | **IMPLEMENTED** (V0.3 §3 — `usage --all` Task별 추세 표) |
+| CI-005 | `limits.yaml`에 Worker 비용/토큰 상한 (현재는 실패 횟수만) | OBS-005 | Low | **IMPLEMENTED** (V0.2 `budget.task_usd`/`plan_usd` 누적 검사 + V0.3 `max_call_budget_usd` 호출당 상한. 호출 중 차단은 아님) |
 | CI-006 | Worker에게 `stop_condition.gates` 명령만 allow-list로 실행 허용 (또는 `loopctl gate --self-check`) | OBS-007 ($4.04 / 9분 폐기), OBS-008 (Worker가 Phase 비용의 88% 차지) | High | **IMPLEMENTED** (V0.1 §2 — `loopctl self-check`) |
 | CI-007 | Worker deny list를 fingerprint `PROTECTED_EXCEPTIONS`와 일치시켜 `.loop/evidence/**` 쓰기 허용 | OBS-002 후속 (Phase 1 8 Task / 9 Run 전부 재현, evidence 전량 공백) | High | **IMPLEMENTED** (V0.1 §1 — `worker/policy.mjs`, Task 단위로 좁힘) |
 | CI-008 | Run 시작 시 execution 레코드 선기록 + PID/heartbeat → `status`에 RUNNING/STALE 표시 | OBS-006 | Medium | **IMPLEMENTED** (V0.1 §4 — 기존 `executions/active/` 표식을 heartbeat 기반으로) |
@@ -1082,7 +1189,7 @@ CI 번호는 부여하지 않았다 — canonical 쪽에서도 아직 부여되�
 
 예시:
 
-- `loopctl init`으로 신규 프로젝트 bootstrap 자동화
+- `loopctl init`으로 신규 프로젝트 bootstrap 자동화 (V0.3에서는 `QUICKSTART.md`로 대신했다. 명령은 아직 없다)
 - dependency-aware `execute-plan`
 - shared working tree 대신 per-Task worktree isolation — OBS-003이 첫 실제 근거
 - Planner Task granularity 개선
