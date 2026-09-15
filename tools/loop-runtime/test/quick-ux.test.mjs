@@ -274,7 +274,8 @@ test('quick and start refuse mixed or missing goal arguments as usage errors', (
 // ------------------------------------------------------------------
 
 test('a task waiting on a DROPPED task is reported as unresolvable, and NEXT does not suggest executing that plan', () => project({}, (p) => {
-  assert.equal(p.run(['plan', 'goal'], { LOOP_MOCK_PLANNER: plannerResult({ tasks: [proposal('P1'), { ...proposal('P2'), depends_on: ['P1'] }] }) }).code, 0);
+  // P3 -> P2 -> P1(DROPPED): P3의 직접 선행은 살아 있지만 전이적으로 막혀 있다.
+  assert.equal(p.run(['plan', 'goal'], { LOOP_MOCK_PLANNER: plannerResult({ tasks: [proposal('P1'), { ...proposal('P2'), depends_on: ['P1'] }, { ...proposal('P3'), depends_on: ['P2'] }] }) }).code, 0);
   const id = p.plans()[0];
   assert.equal(p.run(['plan-approve', id]).code, 0);
   assert.equal(p.run(['transition', 'TASK-001', 'DROPPED']).code, 0);
@@ -285,6 +286,7 @@ test('a task waiting on a DROPPED task is reported as unresolvable, and NEXT doe
   const next = s.stdout.split('NEXT\n')[1];
   assert.doesNotMatch(next, new RegExp(`execute-plan ${id}`), 'a plan that can never progress is not the next command');
   assert.match(next, /waiting on DROPPED tasks/);
+  assert.match(next, /TASK-002, TASK-003/, 'the transitively stuck task is listed too');
   const r = p.run(['execute', 'TASK-002'], GOOD);
   assert.notEqual(r.code, 0);
   assert.match(r.out, /DROPPED — this task needs a replan/);

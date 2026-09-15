@@ -1084,10 +1084,22 @@ function nextCommandHint({ tasks, valid, readySet, verifyReady, active, pendingP
     const created = p.ok && p.approval && !p.approval.corrupt && Array.isArray(p.approval.created_task_ids) ? p.approval.created_task_ids : [];
     const remaining = created.filter((tid) => open(byId.get(tid)));
     if (remaining.length === 0) continue;
-    const runnable = remaining.filter((tid) => {
+    // 전이적으로 본다: DROPPED를 기다리는 Task를 기다리는 Task도 영원히 READY가 되지 않는다.
+    const stuckMemo = new Map();
+    const isStuck = (tid, trail = new Set()) => {
+      if (stuckMemo.has(tid)) return stuckMemo.get(tid);
+      if (trail.has(tid)) return false; // 순환은 validate가 잡는다. 여기서는 무한 재귀만 피한다.
       const t = byId.get(tid);
-      return t.data.status !== 'TODO' || checkDependencies(t, tasks).dropped.length === 0;
-    });
+      if (!t || !t.data) { stuckMemo.set(tid, false); return false; }
+      if (t.data.status === 'DROPPED') { stuckMemo.set(tid, true); return true; }
+      if (t.data.status !== 'TODO') { stuckMemo.set(tid, false); return false; }
+      const d = checkDependencies(t, tasks);
+      const next = new Set(trail).add(tid);
+      const stuck = d.dropped.length > 0 || d.waiting_on.some((dep) => isStuck(dep, next));
+      stuckMemo.set(tid, stuck);
+      return stuck;
+    };
+    const runnable = remaining.filter((tid) => !isStuck(tid));
     if (runnable.length > 0) return { command: `loopctl execute-plan ${id}`, why: `${remaining.length} of ${created.length} task(s) remaining; re-running resumes from them` };
     stuck ??= { id, remaining };
   }
