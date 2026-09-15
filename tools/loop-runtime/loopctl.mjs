@@ -151,7 +151,7 @@ function cmdShow(id) {
   if (declaredDeps.length > 0) {
     out.push(`depends_on: ${declaredDeps.join(', ')}`);
     if (!deps.met) {
-      out.push(`  waiting on: ${[...deps.waiting_on, ...deps.missing.map((m) => `${m} (unresolved)`)].join(', ')}`);
+      out.push(`  waiting on: ${[...deps.waiting_on, ...deps.missing.map((m) => `${m} (unresolved)`), ...deps.dropped.map((m) => `${m} (DROPPED — needs a replan)`)].join(', ')}`);
     }
   }
   out.push('');
@@ -198,7 +198,7 @@ function cmdReady() {
     console.log('Waiting on dependencies:');
     for (const t of waiting) {
       const d = checkDependencies(t, tasks);
-      const blockers = [...d.waiting_on, ...d.missing.map((m) => `${m} (unresolved)`)];
+      const blockers = [...d.waiting_on, ...d.missing.map((m) => `${m} (unresolved)`), ...d.dropped.map((m) => `${m} (DROPPED — needs a replan)`)];
       console.log(`${t.id.padEnd(24)} waiting on: ${blockers.join(', ')}`);
     }
   }
@@ -993,7 +993,7 @@ function cmdStatus() {
       const d = checkDependencies(t, tasks);
       // 새 저장 상태를 만들지 않는다. TODO 그대로 두고 왜 READY가 아닌지만 보여준다.
       const why = !d.met
-        ? `waiting on: ${[...d.waiting_on, ...d.missing.map((m) => `${m} (unresolved)`)].join(', ')}`
+        ? `waiting on: ${[...d.waiting_on, ...d.missing.map((m) => `${m} (unresolved)`), ...d.dropped.map((m) => `${m} (DROPPED — needs a replan)`)].join(', ')}`
         : (isAutoDispatchable(t) ? 'paused' : 'auto_dispatch: false');
       return `${plain(t)}  [${why}]`;
     }));
@@ -1076,13 +1076,22 @@ function nextCommandHint({ tasks, valid, readySet, verifyReady, active, pendingP
     return { command: `loopctl diagnose ${t.id}`, why: `latest execution stopped: ${r.result} (${r.stop_reason})` };
   }
   // 승인된 Plan 중 남은 Task가 있는 것. 가장 오래된 Plan부터 — Phase 순서가 곧 시간 순서다.
+  // 남은 Task가 전부 DROPPED 선행을 기다리면 그 Plan은 영원히 진행되지 않는다. execute-plan을 권하지 않는다.
   const plans = listPlans().slice().reverse();
+  let stuck = null;
   for (const id of plans) {
     const p = loadPlan(id);
     const created = p.ok && p.approval && !p.approval.corrupt && Array.isArray(p.approval.created_task_ids) ? p.approval.created_task_ids : [];
     const remaining = created.filter((tid) => open(byId.get(tid)));
-    if (remaining.length > 0) return { command: `loopctl execute-plan ${id}`, why: `${remaining.length} of ${created.length} task(s) remaining; re-running resumes from them` };
+    if (remaining.length === 0) continue;
+    const runnable = remaining.filter((tid) => {
+      const t = byId.get(tid);
+      return t.data.status !== 'TODO' || checkDependencies(t, tasks).dropped.length === 0;
+    });
+    if (runnable.length > 0) return { command: `loopctl execute-plan ${id}`, why: `${remaining.length} of ${created.length} task(s) remaining; re-running resumes from them` };
+    stuck ??= { id, remaining };
   }
+  if (stuck) return { command: `loopctl start --file <goal.md>`, why: `${stuck.id} has ${stuck.remaining.length} task(s) waiting on DROPPED tasks (${stuck.remaining.join(', ')}); they will never run — replan the remaining goal` };
   if (verifyReady.length > 0) return { command: `loopctl verify ${verifyReady[0].task.id}`, why: 'gates passed; the independent verifier has not run yet' };
   const ready = valid.filter((t) => readySet.has(t.id));
   if (ready.length > 0) return { command: `loopctl execute ${ready[0].id}`, why: `${ready.length} task(s) are READY and belong to no approved plan` };

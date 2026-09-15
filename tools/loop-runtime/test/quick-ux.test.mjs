@@ -268,3 +268,24 @@ test('quick and start refuse mixed or missing goal arguments as usage errors', (
   assert.equal(p.run(['start', 'inline text']).code, 2, 'start does not accept an inline goal');
   assert.equal(p.plans().length, 0);
 }));
+
+// ------------------------------------------------------------------
+// DROPPED 선행 — ply-converter 실측: replan으로 대체된 Task를 기다리던 Task가 무기한 "waiting"으로 남았다
+// ------------------------------------------------------------------
+
+test('a task waiting on a DROPPED task is reported as unresolvable, and NEXT does not suggest executing that plan', () => project({}, (p) => {
+  assert.equal(p.run(['plan', 'goal'], { LOOP_MOCK_PLANNER: plannerResult({ tasks: [proposal('P1'), { ...proposal('P2'), depends_on: ['P1'] }] }) }).code, 0);
+  const id = p.plans()[0];
+  assert.equal(p.run(['plan-approve', id]).code, 0);
+  assert.equal(p.run(['transition', 'TASK-001', 'DROPPED']).code, 0);
+  const ready = p.run(['ready']);
+  assert.match(ready.stdout, /TASK-001 \(DROPPED — needs a replan\)/);
+  const s = p.run(['status']);
+  assert.match(s.stdout, /DROPPED — needs a replan/);
+  const next = s.stdout.split('NEXT\n')[1];
+  assert.doesNotMatch(next, new RegExp(`execute-plan ${id}`), 'a plan that can never progress is not the next command');
+  assert.match(next, /waiting on DROPPED tasks/);
+  const r = p.run(['execute', 'TASK-002'], GOOD);
+  assert.notEqual(r.code, 0);
+  assert.match(r.out, /DROPPED — this task needs a replan/);
+}));

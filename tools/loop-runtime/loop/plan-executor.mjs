@@ -103,7 +103,7 @@ export function selectNextPlanTask(taskIds, { triage = false } = {}) {
   const why = outstanding.map((t) => {
     const d = checkDependencies(t, all);
     if (!d.met) {
-      const waits = [...d.waiting_on, ...d.missing.map((m) => `${m} (unresolved)`)];
+      const waits = [...d.waiting_on, ...d.missing.map((m) => `${m} (unresolved)`), ...d.dropped.map((m) => `${m} (DROPPED — needs a replan)`)];
       return `${t.id} (${t.data.status}) waiting on: ${waits.join(', ')}`;
     }
     return `${t.id} (${t.data.status})`;

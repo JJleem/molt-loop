@@ -61,9 +61,10 @@ export function startFirstAttempt({ task, config, tasks = null }) {
       lines.push('Waiting on:');
       for (const d of deps.waiting_on) lines.push(`  ${d}`);
     }
-    if (deps.missing.length > 0) {
+    if (deps.missing.length > 0 || deps.dropped.length > 0) {
       lines.push('Unresolvable dependencies:');
       for (const d of deps.missing) lines.push(`  ${d}  (not found or invalid)`);
+      for (const d of deps.dropped) lines.push(`  ${d}  (DROPPED — this task needs a replan, it will never become READY)`);
     }
     return { ok: false, errors: lines, dependencies: deps };
   }

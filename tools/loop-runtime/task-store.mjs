@@ -281,13 +281,17 @@ export function checkDependencies(task, tasks = loadAllTasks()) {
   const byId = new Map(tasks.map((t) => [t.id, t]));
   const waiting = [];
   const missing = [];
+  // DROPPED는 종단 상태다. 그것을 기다리는 Task는 영원히 READY가 되지 않으므로 "대기"가 아니라 "해결 불가"다.
+  // (ply-converter 실측: replan으로 대체된 Task를 기다리던 Task 3개가 status에 무기한 waiting으로 남았다.)
+  const dropped = [];
   for (const dep of dependsOn(task)) {
     const d = byId.get(dep);
     if (!d) missing.push(dep);
     else if (!isValid(d)) missing.push(dep);
+    else if (d.data.status === 'DROPPED') dropped.push(dep);
     else if (d.data.status !== 'DONE') waiting.push(dep);
   }
-  return { met: waiting.length === 0 && missing.length === 0, waiting_on: waiting, missing };
+  return { met: waiting.length === 0 && missing.length === 0 && dropped.length === 0, waiting_on: waiting, missing, dropped };
 }
 
 /**
